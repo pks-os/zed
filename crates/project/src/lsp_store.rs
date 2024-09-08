@@ -4250,7 +4250,7 @@ impl LspStore {
 
         let project_settings = ProjectSettings::get(
             Some(SettingsLocation {
-                worktree_id: worktree_id.to_proto() as usize,
+                worktree_id,
                 path: Path::new(""),
             }),
             cx,
@@ -5601,14 +5601,14 @@ impl LspStore {
             {
                 if let Some(watched_paths) = self
                     .language_server_watched_paths
-                    .get(&server_id)
+                    .get(server_id)
                     .and_then(|paths| paths.read(cx).worktree_paths.get(&worktree_id))
                 {
                     let params = lsp::DidChangeWatchedFilesParams {
                         changes: changes
                             .iter()
                             .filter_map(|(path, _, change)| {
-                                if !watched_paths.is_match(&path) {
+                                if !watched_paths.is_match(path) {
                                     return None;
                                 }
                                 let typ = match change {
@@ -6408,8 +6408,8 @@ impl LspAdapterDelegate for ProjectLspAdapterDelegate {
         self.http_client.clone()
     }
 
-    fn worktree_id(&self) -> u64 {
-        self.worktree.id().to_proto()
+    fn worktree_id(&self) -> WorktreeId {
+        self.worktree.id()
     }
 
     fn worktree_root_path(&self) -> &Path {
