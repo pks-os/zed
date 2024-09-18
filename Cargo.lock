@@ -455,6 +455,7 @@ dependencies = [
  "language",
  "parking_lot",
  "serde",
+ "serde_json",
  "workspace",
 ]
 
@@ -3997,6 +3998,33 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ad9cdb4b747e485a12abb0e6566612956c7a1bafa3bdb8d682c5b6d403589e48"
 dependencies = [
  "num-traits",
+]
+
+[[package]]
+name = "evals"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "clap",
+ "client",
+ "clock",
+ "collections",
+ "env_logger",
+ "feature_flags",
+ "fs",
+ "git",
+ "gpui",
+ "http_client",
+ "language",
+ "languages",
+ "node_runtime",
+ "open_ai",
+ "project",
+ "semantic_index",
+ "serde",
+ "serde_json",
+ "settings",
+ "smol",
 ]
 
 [[package]]
@@ -9278,12 +9306,13 @@ dependencies = [
 
 [[package]]
 name = "rodio"
-version = "0.17.3"
+version = "0.19.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "3b1bb7b48ee48471f55da122c0044fcc7600cfcc85db88240b89cb832935e611"
+checksum = "6006a627c1a38d37f3d3a85c6575418cfe34a5392d60a686d0071e1c8d427acb"
 dependencies = [
  "cpal",
  "hound",
+ "thiserror",
 ]
 
 [[package]]
@@ -11056,17 +11085,16 @@ dependencies = [
 
 [[package]]
 name = "sysinfo"
-version = "0.30.13"
+version = "0.31.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0a5b4ddaee55fb2bea2bf0e5000747e5f5c0de765e5a5ff87f4cd106439f4bb3"
+checksum = "355dbe4f8799b304b05e1b0f05fc59b2a18d36645cf169607da45bde2f69a1be"
 dependencies = [
- "cfg-if",
  "core-foundation-sys",
  "libc",
+ "memchr",
  "ntapi",
- "once_cell",
  "rayon",
- "windows 0.52.0",
+ "windows 0.54.0",
 ]
 
 [[package]]
@@ -13416,16 +13444,6 @@ dependencies = [
 
 [[package]]
 name = "windows"
-version = "0.52.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e48a53791691ab099e5e2ad123536d0fff50652600abaf43bbf952894110d0be"
-dependencies = [
- "windows-core 0.52.0",
- "windows-targets 0.52.6",
-]
-
-[[package]]
-name = "windows"
 version = "0.54.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9252e5725dbed82865af151df558e754e4a3c2c30818359eb17465f1346a1b49"
@@ -14079,7 +14097,7 @@ dependencies = [
 [[package]]
 name = "xim"
 version = "0.4.0"
-source = "git+https://github.com/npmania/xim-rs?rev=27132caffc5b9bc9c432ca4afad184ab6e7c16af#27132caffc5b9bc9c432ca4afad184ab6e7c16af"
+source = "git+https://github.com/XDeme1/xim-rs?rev=d50d461764c2213655cd9cf65a0ea94c70d3c4fd#d50d461764c2213655cd9cf65a0ea94c70d3c4fd"
 dependencies = [
  "ahash 0.8.11",
  "hashbrown 0.14.5",
@@ -14092,7 +14110,7 @@ dependencies = [
 [[package]]
 name = "xim-ctext"
 version = "0.3.0"
-source = "git+https://github.com/npmania/xim-rs?rev=27132caffc5b9bc9c432ca4afad184ab6e7c16af#27132caffc5b9bc9c432ca4afad184ab6e7c16af"
+source = "git+https://github.com/XDeme1/xim-rs?rev=d50d461764c2213655cd9cf65a0ea94c70d3c4fd#d50d461764c2213655cd9cf65a0ea94c70d3c4fd"
 dependencies = [
  "encoding_rs",
 ]
@@ -14100,7 +14118,7 @@ dependencies = [
 [[package]]
 name = "xim-parser"
 version = "0.2.1"
-source = "git+https://github.com/npmania/xim-rs?rev=27132caffc5b9bc9c432ca4afad184ab6e7c16af#27132caffc5b9bc9c432ca4afad184ab6e7c16af"
+source = "git+https://github.com/XDeme1/xim-rs?rev=d50d461764c2213655cd9cf65a0ea94c70d3c4fd#d50d461764c2213655cd9cf65a0ea94c70d3c4fd"
 dependencies = [
  "bitflags 2.6.0",
 ]
@@ -14479,7 +14497,7 @@ dependencies = [
 
 [[package]]
 name = "zed_ocaml"
-version = "0.0.2"
+version = "0.1.0"
 dependencies = [
  "zed_extension_api 0.1.0",
 ]
@@ -14514,7 +14532,7 @@ dependencies = [
 
 [[package]]
 name = "zed_ruff"
-version = "0.0.2"
+version = "0.1.0"
 dependencies = [
  "zed_extension_api 0.1.0",
 ]
@@ -14529,7 +14547,7 @@ dependencies = [
 
 [[package]]
 name = "zed_svelte"
-version = "0.1.1"
+version = "0.2.0"
 dependencies = [
  "zed_extension_api 0.1.0",
 ]

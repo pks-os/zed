@@ -26,6 +26,8 @@ use gpui::{
 };
 use lsp::LanguageServerId;
 use parking_lot::Mutex;
+use schemars::JsonSchema;
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use settings::WorktreeId;
 use similar::{ChangeTag, TextDiff};
@@ -161,7 +163,8 @@ pub enum IndentKind {
 }
 
 /// The shape of a selection cursor.
-#[derive(Copy, Clone, PartialEq, Eq, Debug, Default)]
+#[derive(Copy, Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq, JsonSchema)]
+#[serde(rename_all = "snake_case")]
 pub enum CursorShape {
     /// A vertical bar
     #[default]
@@ -3022,7 +3025,7 @@ impl BufferSnapshot {
                 let mut start = text.len();
                 let end = start + buffer_range.len();
 
-                // When multiple names are captured, then the matcheable text
+                // When multiple names are captured, then the matchable text
                 // includes the whitespace in between the names.
                 if !name_ranges.is_empty() {
                     start -= 1;
