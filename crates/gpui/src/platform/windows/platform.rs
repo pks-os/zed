@@ -295,13 +295,9 @@ impl Platform for WindowsPlatform {
         }
     }
 
-    // todo(windows)
     fn activate(&self, _ignoring_other_apps: bool) {}
 
-    // todo(windows)
-    fn hide(&self) {
-        unimplemented!()
-    }
+    fn hide(&self) {}
 
     // todo(windows)
     fn hide_other_apps(&self) {
