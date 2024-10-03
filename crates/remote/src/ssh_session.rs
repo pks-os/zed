@@ -31,11 +31,12 @@ use std::{
     path::{Path, PathBuf},
     sync::{
         atomic::{AtomicU32, Ordering::SeqCst},
-        Arc,
+        Arc, Weak,
     },
     time::Instant,
 };
 use tempfile::TempDir;
+use util::maybe;
 
 #[derive(
     Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Clone, Copy, serde::Serialize, serde::Deserialize,
@@ -48,7 +49,7 @@ pub struct SshSocket {
     socket_path: PathBuf,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub struct SshConnectionOptions {
     pub host: String,
     pub username: Option<String>,
@@ -244,12 +245,13 @@ struct SshRemoteClientState {
     ssh_connection: SshRemoteConnection,
     delegate: Arc<dyn SshClientDelegate>,
     forwarder: ChannelForwarder,
-    _multiplex_task: Task<Result<()>>,
+    multiplex_task: Task<Result<()>>,
 }
 
 pub struct SshRemoteClient {
     client: Arc<ChannelClient>,
-    inner_state: Arc<Mutex<Option<SshRemoteClientState>>>,
+    inner_state: Mutex<Option<SshRemoteClientState>>,
+    connection_options: SshConnectionOptions,
 }
 
 impl SshRemoteClient {
@@ -264,7 +266,8 @@ impl SshRemoteClient {
         let client = cx.update(|cx| ChannelClient::new(incoming_rx, outgoing_tx, cx))?;
         let this = Arc::new(Self {
             client,
-            inner_state: Arc::new(Mutex::new(None)),
+            inner_state: Mutex::new(None),
+            connection_options: connection_options.clone(),
         });
 
         let inner_state = {
@@ -272,11 +275,10 @@ impl SshRemoteClient {
                 ChannelForwarder::new(incoming_tx, outgoing_rx, cx);
 
             let (ssh_connection, ssh_process) =
-                Self::establish_connection(connection_options.clone(), delegate.clone(), cx)
-                    .await?;
+                Self::establish_connection(connection_options, delegate.clone(), cx).await?;
 
             let multiplex_task = Self::multiplex(
-                this.clone(),
+                Arc::downgrade(&this),
                 ssh_process,
                 proxy_incoming_tx,
                 proxy_outgoing_rx,
@@ -287,7 +289,7 @@ impl SshRemoteClient {
                 ssh_connection,
                 delegate,
                 forwarder: proxy,
-                _multiplex_task: multiplex_task,
+                multiplex_task,
             }
         };
 
@@ -305,9 +307,9 @@ impl SshRemoteClient {
             mut ssh_connection,
             delegate,
             forwarder: proxy,
-            _multiplex_task,
+            multiplex_task,
         } = state;
-        drop(_multiplex_task);
+        drop(multiplex_task);
 
         cx.spawn(|mut cx| async move {
             let (incoming_tx, outgoing_rx) = proxy.into_channels().await;
@@ -331,8 +333,8 @@ impl SshRemoteClient {
                 ssh_connection,
                 delegate,
                 forwarder: proxy,
-                _multiplex_task: Self::multiplex(
-                    this.clone(),
+                multiplex_task: Self::multiplex(
+                    Arc::downgrade(&this),
                     ssh_process,
                     proxy_incoming_tx,
                     proxy_outgoing_rx,
@@ -349,7 +351,7 @@ impl SshRemoteClient {
     }
 
     fn multiplex(
-        this: Arc<Self>,
+        this: Weak<Self>,
         mut ssh_process: Child,
         incoming_tx: UnboundedSender<Envelope>,
         mut outgoing_rx: UnboundedReceiver<Envelope>,
@@ -444,7 +446,9 @@ impl SshRemoteClient {
 
             if let Err(error) = result {
                 log::warn!("ssh io task died with error: {:?}. reconnecting...", error);
-                Self::reconnect(this, &mut cx).ok();
+                if let Some(this) = this.upgrade() {
+                    Self::reconnect(this, &mut cx).ok();
+                }
             }
 
             Ok(())
@@ -503,6 +507,13 @@ impl SshRemoteClient {
         self.client.clone().into()
     }
 
+    pub fn connection_string(&self) -> String {
+        self.connection_options.connection_string()
+    }
+
+    pub fn is_reconnect_underway(&self) -> bool {
+        maybe!({ Some(self.inner_state.try_lock()?.is_none()) }).unwrap_or_default()
+    }
     #[cfg(any(test, feature = "test-support"))]
     pub fn fake(
         client_cx: &mut gpui::TestAppContext,
@@ -516,7 +527,8 @@ impl SshRemoteClient {
                 let client = ChannelClient::new(server_to_client_rx, client_to_server_tx, cx);
                 Arc::new(Self {
                     client,
-                    inner_state: Arc::new(Mutex::new(None)),
+                    inner_state: Mutex::new(None),
+                    connection_options: SshConnectionOptions::default(),
                 })
             }),
             server_cx.update(|cx| ChannelClient::new(client_to_server_rx, server_to_client_tx, cx)),
