@@ -1,8 +1,8 @@
-use std::{any::type_name, borrow::Cow, io::Read, mem, pin::Pin, sync::OnceLock, task::Poll};
+use std::{any::type_name, mem, pin::Pin, sync::OnceLock, task::Poll};
 
 use anyhow::anyhow;
 use bytes::{BufMut, Bytes, BytesMut};
-use futures::{AsyncRead, TryStreamExt};
+use futures::{AsyncRead, TryStreamExt as _};
 use http_client::{http, ReadTimeout, RedirectPolicy};
 use reqwest::{
     header::{HeaderMap, HeaderValue},
@@ -11,6 +11,7 @@ use reqwest::{
 use smol::future::FutureExt;
 
 const DEFAULT_CAPACITY: usize = 4096;
+static RUNTIME: OnceLock<tokio::runtime::Runtime> = OnceLock::new();
 
 pub struct ReqwestClient {
     client: reqwest::Client,
@@ -20,20 +21,29 @@ pub struct ReqwestClient {
 
 impl ReqwestClient {
     pub fn new() -> Self {
-        reqwest::Client::new().into()
+        reqwest::Client::builder()
+            .use_rustls_tls()
+            .build()
+            .expect("Failed to initialize HTTP client")
+            .into()
     }
 
     pub fn user_agent(agent: &str) -> anyhow::Result<Self> {
         let mut map = HeaderMap::new();
         map.insert(http::header::USER_AGENT, HeaderValue::from_str(agent)?);
-        let client = reqwest::Client::builder().default_headers(map).build()?;
+        let client = reqwest::Client::builder()
+            .default_headers(map)
+            .use_rustls_tls()
+            .build()?;
         Ok(client.into())
     }
 
     pub fn proxy_and_user_agent(proxy: Option<http::Uri>, agent: &str) -> anyhow::Result<Self> {
         let mut map = HeaderMap::new();
         map.insert(http::header::USER_AGENT, HeaderValue::from_str(agent)?);
-        let mut client = reqwest::Client::builder().default_headers(map);
+        let mut client = reqwest::Client::builder()
+            .use_rustls_tls()
+            .default_headers(map);
         if let Some(proxy) = proxy.clone() {
             client = client.proxy(reqwest::Proxy::all(proxy.to_string())?);
         }
@@ -43,8 +53,6 @@ impl ReqwestClient {
         Ok(client)
     }
 }
-
-static RUNTIME: OnceLock<tokio::runtime::Runtime> = OnceLock::new();
 
 impl From<reqwest::Client> for ReqwestClient {
     fn from(client: reqwest::Client) -> Self {
@@ -165,39 +173,6 @@ pub fn poll_read_buf(
     Poll::Ready(Ok(n))
 }
 
-struct SyncReader {
-    cursor: Option<std::io::Cursor<Cow<'static, [u8]>>>,
-}
-
-impl SyncReader {
-    fn new(cursor: std::io::Cursor<Cow<'static, [u8]>>) -> Self {
-        Self {
-            cursor: Some(cursor),
-        }
-    }
-}
-
-impl futures::stream::Stream for SyncReader {
-    type Item = Result<Bytes, std::io::Error>;
-
-    fn poll_next(
-        mut self: std::pin::Pin<&mut Self>,
-        _cx: &mut std::task::Context<'_>,
-    ) -> std::task::Poll<Option<Self::Item>> {
-        let Some(mut cursor) = self.cursor.take() else {
-            return Poll::Ready(None);
-        };
-
-        let mut buf = Vec::new();
-        match cursor.read_to_end(&mut buf) {
-            Ok(_) => {
-                return Poll::Ready(Some(Ok(Bytes::from(buf))));
-            }
-            Err(e) => return Poll::Ready(Some(Err(e))),
-        }
-    }
-}
-
 impl http_client::HttpClient for ReqwestClient {
     fn proxy(&self) -> Option<&http::Uri> {
         self.proxy.as_ref()
@@ -230,9 +205,7 @@ impl http_client::HttpClient for ReqwestClient {
         }
         let request = request.body(match body.0 {
             http_client::Inner::Empty => reqwest::Body::default(),
-            http_client::Inner::SyncReader(cursor) => {
-                reqwest::Body::wrap_stream(SyncReader::new(cursor))
-            }
+            http_client::Inner::Bytes(cursor) => cursor.into_inner().into(),
             http_client::Inner::AsyncReader(stream) => {
                 reqwest::Body::wrap_stream(StreamReader::new(stream))
             }
