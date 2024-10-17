@@ -137,7 +137,11 @@ pub trait SshClientDelegate: Send + Sync {
         prompt: String,
         cx: &mut AsyncAppContext,
     ) -> oneshot::Receiver<Result<String>>;
-    fn remote_server_binary_path(&self, cx: &mut AsyncAppContext) -> Result<PathBuf>;
+    fn remote_server_binary_path(
+        &self,
+        platform: SshPlatform,
+        cx: &mut AsyncAppContext,
+    ) -> Result<PathBuf>;
     fn get_server_binary(
         &self,
         platform: SshPlatform,
@@ -739,7 +743,11 @@ impl SshRemoteClient {
 
                 loop {
                     select_biased! {
-                        _ = connection_activity_rx.next().fuse() => {
+                        result = connection_activity_rx.next().fuse() => {
+                            if result.is_none() {
+                                log::warn!("ssh heartbeat: connection activity channel has been dropped. stopping.");
+                                return Ok(());
+                            }
                             keepalive_timer.set(cx.background_executor().timer(HEARTBEAT_INTERVAL).fuse());
                         }
                         _ = keepalive_timer => {
@@ -971,16 +979,9 @@ impl SshRemoteClient {
             SshRemoteConnection::new(connection_options, delegate.clone(), cx).await?;
 
         let platform = ssh_connection.query_platform().await?;
-        let (local_binary_path, version) = delegate.get_server_binary(platform, cx).await??;
-        let remote_binary_path = delegate.remote_server_binary_path(cx)?;
+        let remote_binary_path = delegate.remote_server_binary_path(platform, cx)?;
         ssh_connection
-            .ensure_server_binary(
-                &delegate,
-                &local_binary_path,
-                &remote_binary_path,
-                version,
-                cx,
-            )
+            .ensure_server_binary(&delegate, &remote_binary_path, platform, cx)
             .await?;
 
         let socket = ssh_connection.socket.clone();
@@ -1021,7 +1022,7 @@ impl SshRemoteClient {
             .map(|ssh_connection| ssh_connection.socket.ssh_args())
     }
 
-    pub fn to_proto_client(&self) -> AnyProtoClient {
+    pub fn proto_client(&self) -> AnyProtoClient {
         self.client.clone().into()
     }
 
@@ -1178,7 +1179,14 @@ impl SshRemoteConnection {
             .stderr(Stdio::piped())
             .env("SSH_ASKPASS_REQUIRE", "force")
             .env("SSH_ASKPASS", &askpass_script_path)
-            .args(["-N", "-o", "ControlMaster=yes", "-o"])
+            .args([
+                "-N",
+                "-o",
+                "ControlPersist=no",
+                "-o",
+                "ControlMaster=yes",
+                "-o",
+            ])
             .arg(format!("ControlPath={}", socket_path.display()))
             .arg(&url)
             .spawn()?;
@@ -1237,11 +1245,19 @@ impl SshRemoteConnection {
     async fn ensure_server_binary(
         &self,
         delegate: &Arc<dyn SshClientDelegate>,
-        src_path: &Path,
         dst_path: &Path,
-        version: SemanticVersion,
+        platform: SshPlatform,
         cx: &mut AsyncAppContext,
     ) -> Result<()> {
+        if std::env::var("ZED_USE_CACHED_REMOTE_SERVER").is_ok() {
+            if let Ok(installed_version) =
+                run_cmd(self.socket.ssh_command(dst_path).arg("version")).await
+            {
+                log::info!("using cached server binary version {}", installed_version);
+                return Ok(());
+            }
+        }
+
         let mut dst_path_gz = dst_path.to_path_buf();
         dst_path_gz.set_extension("gz");
 
@@ -1249,8 +1265,10 @@ impl SshRemoteConnection {
             run_cmd(self.socket.ssh_command("mkdir").arg("-p").arg(parent)).await?;
         }
 
+        let (src_path, version) = delegate.get_server_binary(platform, cx).await??;
+
         let mut server_binary_exists = false;
-        if cfg!(not(debug_assertions)) {
+        if !server_binary_exists && cfg!(not(debug_assertions)) {
             if let Ok(installed_version) =
                 run_cmd(self.socket.ssh_command(dst_path).arg("version")).await
             {
@@ -1265,14 +1283,14 @@ impl SshRemoteConnection {
             return Ok(());
         }
 
-        let src_stat = fs::metadata(src_path).await?;
+        let src_stat = fs::metadata(&src_path).await?;
         let size = src_stat.len();
         let server_mode = 0o755;
 
         let t0 = Instant::now();
         delegate.set_status(Some("uploading remote development server"), cx);
         log::info!("uploading remote development server ({}kb)", size / 1024);
-        self.upload_file(src_path, &dst_path_gz)
+        self.upload_file(&src_path, &dst_path_gz)
             .await
             .context("failed to upload server binary")?;
         log::info!("uploaded remote development server in {:?}", t0.elapsed());
