@@ -186,7 +186,7 @@ impl SshConnectionOptions {
 
     // Uniquely identifies dev server projects on a remote host. Needs to be
     // stable for the same dev server project.
-    pub fn dev_server_identifier(&self) -> String {
+    pub fn remote_server_identifier(&self) -> String {
         let mut identifier = format!("dev-server-{:?}", self.host);
         if let Some(username) = self.username.as_ref() {
             identifier.push('-');
@@ -1202,7 +1202,7 @@ impl SshRemoteConnection {
         use smol::{fs::unix::PermissionsExt as _, net::unix::UnixListener};
         use util::ResultExt as _;
 
-        delegate.set_status(Some("connecting"), cx);
+        delegate.set_status(Some("Connecting"), cx);
 
         let url = connection_options.ssh_url();
         let temp_dir = tempfile::Builder::new()
