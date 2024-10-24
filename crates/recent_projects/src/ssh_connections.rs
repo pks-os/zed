@@ -1,19 +1,20 @@
 use std::{path::PathBuf, sync::Arc, time::Duration};
 
-use anyhow::Result;
+use anyhow::{anyhow, Result};
 use auto_update::AutoUpdater;
 use editor::Editor;
 use futures::channel::oneshot;
 use gpui::{
     percentage, Animation, AnimationExt, AnyWindowHandle, AsyncAppContext, DismissEvent,
     EventEmitter, FocusableView, ParentElement as _, PromptLevel, Render, SemanticVersion,
-    SharedString, Task, TextStyleRefinement, Transformation, View,
+    SharedString, Task, TextStyleRefinement, Transformation, View, WeakView,
 };
 use gpui::{AppContext, Model};
 
 use language::CursorShape;
 use markdown::{Markdown, MarkdownStyle};
 use release_channel::{AppVersion, ReleaseChannel};
+use remote::ssh_session::ServerBinary;
 use remote::{SshConnectionOptions, SshPlatform, SshRemoteClient};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -25,9 +26,15 @@ use ui::{
 };
 use workspace::{AppState, ModalView, Workspace};
 
+#[derive(Clone, Default, Serialize, Deserialize, JsonSchema)]
+pub struct RemoteServerSettings {
+    pub download_on_host: Option<bool>,
+}
+
 #[derive(Deserialize)]
 pub struct SshSettings {
     pub ssh_connections: Option<Vec<SshConnection>>,
+    pub remote_server: Option<RemoteServerSettings>,
 }
 
 impl SshSettings {
@@ -107,6 +114,7 @@ pub struct SshProject {
 #[derive(Clone, Default, Serialize, Deserialize, JsonSchema)]
 pub struct RemoteSettingsContent {
     pub ssh_connections: Option<Vec<SshConnection>>,
+    pub remote_server: Option<RemoteServerSettings>,
 }
 
 impl Settings for SshSettings {
@@ -126,6 +134,14 @@ pub struct SshPrompt {
     prompt: Option<(View<Markdown>, oneshot::Sender<Result<String>>)>,
     cancellation: Option<oneshot::Sender<()>>,
     editor: View<Editor>,
+}
+
+impl Drop for SshPrompt {
+    fn drop(&mut self) {
+        if let Some(cancel) = self.cancellation.take() {
+            cancel.send(()).ok();
+        }
+    }
 }
 
 pub struct SshConnectionModal {
@@ -320,17 +336,26 @@ impl RenderOnce for SshConnectionHeader {
             .child(
                 h_flex()
                     .gap_1()
-                    .child(Headline::new(main_label).size(HeadlineSize::XSmall))
+                    .overflow_x_hidden()
+                    .child(
+                        div()
+                            .max_w_96()
+                            .overflow_x_hidden()
+                            .text_ellipsis()
+                            .child(Headline::new(main_label).size(HeadlineSize::XSmall)),
+                    )
                     .children(
                         meta_label.map(|label| {
                             Label::new(label).color(Color::Muted).size(LabelSize::Small)
                         }),
                     )
-                    .children(self.paths.into_iter().map(|path| {
-                        Label::new(path.to_string_lossy().to_string())
-                            .size(LabelSize::Small)
-                            .color(Color::Muted)
-                    })),
+                    .child(div().overflow_x_hidden().text_ellipsis().children(
+                        self.paths.into_iter().map(|path| {
+                            Label::new(path.to_string_lossy().to_string())
+                                .size(LabelSize::Small)
+                                .color(Color::Muted)
+                        }),
+                    )),
             )
     }
 }
@@ -393,7 +418,7 @@ impl ModalView for SshConnectionModal {
 #[derive(Clone)]
 pub struct SshClientDelegate {
     window: AnyWindowHandle,
-    ui: View<SshPrompt>,
+    ui: WeakView<SshPrompt>,
     known_password: Option<String>,
 }
 
@@ -427,7 +452,7 @@ impl remote::SshClientDelegate for SshClientDelegate {
         &self,
         platform: SshPlatform,
         cx: &mut AsyncAppContext,
-    ) -> oneshot::Receiver<Result<(PathBuf, SemanticVersion)>> {
+    ) -> oneshot::Receiver<Result<(ServerBinary, SemanticVersion)>> {
         let (tx, rx) = oneshot::channel();
         let this = self.clone();
         cx.spawn(|mut cx| async move {
@@ -468,10 +493,18 @@ impl SshClientDelegate {
         &self,
         platform: SshPlatform,
         cx: &mut AsyncAppContext,
-    ) -> Result<(PathBuf, SemanticVersion)> {
-        let (version, release_channel) = cx.update(|cx| {
-            let global = AppVersion::global(cx);
-            (global, ReleaseChannel::global(cx))
+    ) -> Result<(ServerBinary, SemanticVersion)> {
+        let (version, release_channel, download_binary_on_host) = cx.update(|cx| {
+            let version = AppVersion::global(cx);
+            let channel = ReleaseChannel::global(cx);
+
+            let ssh_settings = SshSettings::get_global(cx);
+            let download_binary_on_host = ssh_settings
+                .remote_server
+                .as_ref()
+                .and_then(|server| server.download_on_host)
+                .unwrap_or(false);
+            (version, channel, download_binary_on_host)
         })?;
 
         // In dev mode, build the remote server binary from source
@@ -479,29 +512,55 @@ impl SshClientDelegate {
         if release_channel == ReleaseChannel::Dev {
             let result = self.build_local(cx, platform, version).await?;
             // Fall through to a remote binary if we're not able to compile a local binary
-            if let Some(result) = result {
-                return Ok(result);
+            if let Some((path, version)) = result {
+                return Ok((ServerBinary::LocalBinary(path), version));
             }
         }
 
-        self.update_status(Some("checking for latest version of remote server"), cx);
-        let binary_path = AutoUpdater::get_latest_remote_server_release(
-            platform.os,
-            platform.arch,
-            release_channel,
-            cx,
-        )
-        .await
-        .map_err(|e| {
-            anyhow::anyhow!(
-                "failed to download remote server binary (os: {}, arch: {}): {}",
+        if download_binary_on_host {
+            let (request_url, request_body) = AutoUpdater::get_latest_remote_server_release_url(
                 platform.os,
                 platform.arch,
-                e
+                release_channel,
+                cx,
             )
-        })?;
+            .await
+            .map_err(|e| {
+                anyhow!(
+                    "failed to get remote server binary download url (os: {}, arch: {}): {}",
+                    platform.os,
+                    platform.arch,
+                    e
+                )
+            })?;
 
-        Ok((binary_path, version))
+            Ok((
+                ServerBinary::ReleaseUrl {
+                    url: request_url,
+                    body: request_body,
+                },
+                version,
+            ))
+        } else {
+            self.update_status(Some("checking for latest version of remote server"), cx);
+            let binary_path = AutoUpdater::get_latest_remote_server_release(
+                platform.os,
+                platform.arch,
+                release_channel,
+                cx,
+            )
+            .await
+            .map_err(|e| {
+                anyhow!(
+                    "failed to download remote server binary (os: {}, arch: {}): {}",
+                    platform.os,
+                    platform.arch,
+                    e
+                )
+            })?;
+
+            Ok((ServerBinary::LocalBinary(binary_path), version))
+        }
     }
 
     #[cfg(debug_assertions)]
@@ -509,8 +568,8 @@ impl SshClientDelegate {
         &self,
         cx: &mut AsyncAppContext,
         platform: SshPlatform,
-        version: SemanticVersion,
-    ) -> Result<Option<(PathBuf, SemanticVersion)>> {
+        version: gpui::SemanticVersion,
+    ) -> Result<Option<(PathBuf, gpui::SemanticVersion)>> {
         use smol::process::{Command, Stdio};
 
         async fn run_cmd(command: &mut Command) -> Result<()> {
@@ -520,7 +579,7 @@ impl SshClientDelegate {
                 .output()
                 .await?;
             if !output.status.success() {
-                Err(anyhow::anyhow!("failed to run command: {:?}", command))?;
+                Err(anyhow!("failed to run command: {:?}", command))?;
             }
             Ok(())
         }
@@ -629,7 +688,7 @@ pub fn connect_over_ssh(
         rx,
         Arc::new(SshClientDelegate {
             window,
-            ui,
+            ui: ui.downgrade(),
             known_password,
         }),
         cx,
@@ -686,7 +745,7 @@ pub async fn open_ssh_project(
 
                 Some(Arc::new(SshClientDelegate {
                     window: cx.window_handle(),
-                    ui,
+                    ui: ui.downgrade(),
                     known_password: connection_options.password.clone(),
                 }))
             }
