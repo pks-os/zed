@@ -1721,6 +1721,7 @@ message Collaborator {
     PeerId peer_id = 1;
     uint32 replica_id = 2;
     uint64 user_id = 3;
+    bool is_host = 4;
 }
 
 message User {
@@ -2116,10 +2117,16 @@ message CommitPermalink {
 }
 
 message BlameBufferResponse {
-    repeated BlameEntry entries = 1;
-    repeated CommitMessage messages = 2;
-    repeated CommitPermalink permalinks = 3;
-    optional string remote_url = 4;
+    message BlameResponse {
+        repeated BlameEntry entries = 1;
+        repeated CommitMessage messages = 2;
+        repeated CommitPermalink permalinks = 3;
+        optional string remote_url = 4;
+    }
+
+    optional BlameResponse blame_response = 5;
+
+    reserved 1 to 4;
 }
 
 message MultiLspQuery {

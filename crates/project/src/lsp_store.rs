@@ -675,6 +675,7 @@ impl LocalLspStore {
     }
 }
 
+#[derive(Debug)]
 pub struct FormattableBuffer {
     handle: Model<Buffer>,
     abs_path: Option<PathBuf>,
@@ -4043,6 +4044,20 @@ impl LspStore {
                         .or_default()
                         .insert(server_id, summary);
                 }
+                if let Some((downstream_client, project_id)) = &this.downstream_client {
+                    downstream_client
+                        .send(proto::UpdateDiagnosticSummary {
+                            project_id: *project_id,
+                            worktree_id: worktree_id.to_proto(),
+                            summary: Some(proto::DiagnosticSummary {
+                                path: project_path.path.to_string_lossy().to_string(),
+                                language_server_id: server_id.0 as u64,
+                                error_count: summary.error_count as u32,
+                                warning_count: summary.warning_count as u32,
+                            }),
+                        })
+                        .log_err();
+                }
                 cx.emit(LspStoreEvent::DiagnosticsUpdated {
                     language_server_id: LanguageServerId(message.language_server_id as usize),
                     path: project_path,
@@ -5342,7 +5357,7 @@ impl LspStore {
                 buffers.insert(this.buffer_store.read(cx).get_existing(buffer_id)?);
             }
             let trigger = FormatTrigger::from_proto(envelope.payload.trigger);
-            Ok::<_, anyhow::Error>(this.format(buffers, false, trigger, FormatTarget::Buffer, cx))
+            anyhow::Ok(this.format(buffers, false, trigger, FormatTarget::Buffer, cx))
         })??;
 
         let project_transaction = format.await?;
@@ -5914,7 +5929,6 @@ impl LspStore {
                     let adapter = adapter.clone();
                     if let Some(this) = this.upgrade() {
                         adapter.process_diagnostics(&mut params);
-                        // Everything else has to be on the server, Can we make it on the client?
                         this.update(&mut cx, |this, cx| {
                             this.update_diagnostics(
                                 server_id,
