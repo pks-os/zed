@@ -6309,6 +6309,7 @@ dependencies = [
  "settings",
  "smol",
  "strum 0.25.0",
+ "telemetry_events",
  "text",
  "theme",
  "thiserror",
@@ -9535,6 +9536,7 @@ dependencies = [
  "fs",
  "futures 0.3.30",
  "gpui",
+ "itertools 0.13.0",
  "log",
  "parking_lot",
  "prost",
@@ -12093,6 +12095,7 @@ dependencies = [
  "serde_json_lenient",
  "serde_repr",
  "settings",
+ "strum 0.25.0",
  "util",
  "uuid",
 ]
