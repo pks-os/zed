@@ -3219,6 +3219,21 @@ impl Workspace {
         &self.active_pane
     }
 
+    pub fn focused_pane(&self, cx: &WindowContext) -> View<Pane> {
+        for dock in [&self.left_dock, &self.right_dock, &self.bottom_dock] {
+            if dock.focus_handle(cx).contains_focused(cx) {
+                if let Some(pane) = dock
+                    .read(cx)
+                    .active_panel()
+                    .and_then(|panel| panel.pane(cx))
+                {
+                    return pane;
+                }
+            }
+        }
+        self.active_pane().clone()
+    }
+
     pub fn adjacent_pane(&mut self, cx: &mut ViewContext<Self>) -> View<Pane> {
         self.find_pane_in_direction(SplitDirection::Right, cx)
             .or_else(|| self.find_pane_in_direction(SplitDirection::Left, cx))
@@ -4666,7 +4681,7 @@ enum ActivateInDirectionTarget {
 }
 
 fn notify_if_database_failed(workspace: WindowHandle<Workspace>, cx: &mut AsyncAppContext) {
-    const REPORT_ISSUE_URL: &str = "https://github.com/zed-industries/zed/issues/new?assignees=&labels=defect%2Ctriage&template=2_bug_report.yml";
+    const REPORT_ISSUE_URL: &str = "https://github.com/zed-industries/zed/issues/new?assignees=&labels=admin+read%2Ctriage%2Cbug&projects=&template=1_bug_report.yml";
 
     workspace
         .update(cx, |workspace, cx| {
