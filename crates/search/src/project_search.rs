@@ -1067,7 +1067,7 @@ impl ProjectSearchView {
             let range_to_select = match_ranges[new_index].clone();
             self.results_editor.update(cx, |editor, cx| {
                 let range_to_select = editor.range_for_match(&range_to_select);
-                editor.unfold_ranges([range_to_select.clone()], false, true, cx);
+                editor.unfold_ranges(&[range_to_select.clone()], false, true, cx);
                 editor.change_selections(Some(Autoscroll::fit()), cx, |s| {
                     s.select_ranges([range_to_select])
                 });
@@ -2024,6 +2024,7 @@ pub fn perform_project_search(
     text: impl Into<std::sync::Arc<str>>,
     cx: &mut gpui::VisualTestContext,
 ) {
+    cx.run_until_parked();
     search_view.update(cx, |search_view, cx| {
         search_view
             .query_editor
