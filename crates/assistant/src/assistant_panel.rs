@@ -1,4 +1,6 @@
 use crate::slash_command::file_command::codeblock_fence_for_path;
+use crate::slash_command_working_set::SlashCommandWorkingSet;
+use crate::ToolWorkingSet;
 use crate::{
     assistant_settings::{AssistantDockPosition, AssistantSettings},
     humanize_token_count,
@@ -7,21 +9,20 @@ use crate::{
     slash_command::{
         default_command::DefaultSlashCommand,
         docs_command::{DocsSlashCommand, DocsSlashCommandArgs},
-        file_command, SlashCommandCompletionProvider, SlashCommandRegistry,
+        file_command, SlashCommandCompletionProvider,
     },
     slash_command_picker,
     terminal_inline_assistant::TerminalInlineAssistant,
     Assist, AssistantPatch, AssistantPatchStatus, CacheStatus, ConfirmCommand, Content, Context,
     ContextEvent, ContextId, ContextStore, ContextStoreEvent, CopyCode, CycleMessageRole,
     DeployHistory, DeployPromptLibrary, Edit, InlineAssistant, InsertDraggedFiles,
-    InsertIntoEditor, InvokedSlashCommandStatus, Message, MessageId, MessageMetadata,
-    MessageStatus, ModelPickerDelegate, ModelSelector, NewContext, ParsedSlashCommand,
-    PendingSlashCommandStatus, QuoteSelection, RemoteContextMetadata, RequestType,
-    SavedContextMetadata, SlashCommandId, Split, ToggleFocus, ToggleModelSelector,
+    InsertIntoEditor, InvokedSlashCommandId, InvokedSlashCommandStatus, Message, MessageId,
+    MessageMetadata, MessageStatus, ModelPickerDelegate, ModelSelector, NewContext,
+    ParsedSlashCommand, PendingSlashCommandStatus, QuoteSelection, RemoteContextMetadata,
+    RequestType, SavedContextMetadata, Split, ToggleFocus, ToggleModelSelector,
 };
 use anyhow::Result;
 use assistant_slash_command::{SlashCommand, SlashCommandOutputSection};
-use assistant_tool::ToolRegistry;
 use client::{proto, zed_urls, Client, Status};
 use collections::{hash_map, BTreeSet, HashMap, HashSet};
 use editor::{
@@ -77,8 +78,8 @@ use text::SelectionGoal;
 use ui::{
     prelude::*,
     utils::{format_distance_from_now, DateTimeType},
-    Avatar, ButtonLike, ContextMenu, Disclosure, ElevationIndex, IconButtonShape, KeyBinding,
-    ListItem, ListItemSpacing, PopoverMenu, PopoverMenuHandle, TintColor, Tooltip,
+    Avatar, ButtonLike, ContextMenu, Disclosure, ElevationIndex, KeyBinding, ListItem,
+    ListItemSpacing, PopoverMenu, PopoverMenuHandle, TintColor, Tooltip,
 };
 use util::{maybe, ResultExt};
 use workspace::{
@@ -112,7 +113,8 @@ pub fn init(cx: &mut AppContext) {
                 .register_action(ContextEditor::copy_code)
                 .register_action(ContextEditor::insert_dragged_files)
                 .register_action(AssistantPanel::show_configuration)
-                .register_action(AssistantPanel::create_new_context);
+                .register_action(AssistantPanel::create_new_context)
+                .register_action(AssistantPanel::restart_context_servers);
         },
     )
     .detach();
@@ -315,10 +317,12 @@ impl AssistantPanel {
         cx: AsyncWindowContext,
     ) -> Task<Result<View<Self>>> {
         cx.spawn(|mut cx| async move {
+            let slash_commands = Arc::new(SlashCommandWorkingSet::default());
+            let tools = Arc::new(ToolWorkingSet::default());
             let context_store = workspace
                 .update(&mut cx, |workspace, cx| {
                     let project = workspace.project().clone();
-                    ContextStore::new(project, prompt_builder.clone(), cx)
+                    ContextStore::new(project, prompt_builder.clone(), slash_commands, tools, cx)
                 })?
                 .await?;
 
@@ -1294,6 +1298,24 @@ impl AssistantPanel {
             .active_provider()
             .map_or(None, |provider| Some(provider.authenticate(cx)))
     }
+
+    fn restart_context_servers(
+        workspace: &mut Workspace,
+        _action: &context_servers::Restart,
+        cx: &mut ViewContext<Workspace>,
+    ) {
+        let Some(assistant_panel) = workspace.panel::<AssistantPanel>(cx) else {
+            return;
+        };
+
+        assistant_panel.update(cx, |assistant_panel, cx| {
+            assistant_panel
+                .context_store
+                .update(cx, |context_store, cx| {
+                    context_store.restart_context_servers(cx);
+                });
+        });
+    }
 }
 
 impl Render for AssistantPanel {
@@ -1468,6 +1490,8 @@ enum AssistError {
 pub struct ContextEditor {
     context: Model<Context>,
     fs: Arc<dyn Fs>,
+    slash_commands: Arc<SlashCommandWorkingSet>,
+    tools: Arc<ToolWorkingSet>,
     workspace: WeakView<Workspace>,
     project: Model<Project>,
     lsp_adapter_delegate: Option<Arc<dyn LspAdapterDelegate>>,
@@ -1477,7 +1501,7 @@ pub struct ContextEditor {
     scroll_position: Option<ScrollPosition>,
     remote_id: Option<workspace::ViewId>,
     pending_slash_command_creases: HashMap<Range<language::Anchor>, CreaseId>,
-    invoked_slash_command_creases: HashMap<SlashCommandId, CreaseId>,
+    invoked_slash_command_creases: HashMap<InvokedSlashCommandId, CreaseId>,
     pending_tool_use_creases: HashMap<Range<language::Anchor>, CreaseId>,
     _subscriptions: Vec<Subscription>,
     patches: HashMap<Range<language::Anchor>, PatchViewState>,
@@ -1536,8 +1560,12 @@ impl ContextEditor {
 
         let sections = context.read(cx).slash_command_output_sections().to_vec();
         let patch_ranges = context.read(cx).patch_ranges().collect::<Vec<_>>();
+        let slash_commands = context.read(cx).slash_commands.clone();
+        let tools = context.read(cx).tools.clone();
         let mut this = Self {
             context,
+            slash_commands,
+            tools,
             editor,
             lsp_adapter_delegate,
             blocks: Default::default(),
@@ -1688,7 +1716,7 @@ impl ContextEditor {
     }
 
     pub fn insert_command(&mut self, name: &str, cx: &mut ViewContext<Self>) {
-        if let Some(command) = SlashCommandRegistry::global(cx).command(name) {
+        if let Some(command) = self.slash_commands.command(name, cx) {
             self.editor.update(cx, |editor, cx| {
                 editor.transact(cx, |editor, cx| {
                     editor.change_selections(Some(Autoscroll::fit()), cx, |s| s.try_cancel());
@@ -1770,7 +1798,7 @@ impl ContextEditor {
         workspace: WeakView<Workspace>,
         cx: &mut ViewContext<Self>,
     ) {
-        if let Some(command) = SlashCommandRegistry::global(cx).command(name) {
+        if let Some(command) = self.slash_commands.command(name, cx) {
             let context = self.context.read(cx);
             let sections = context
                 .slash_command_output_sections()
@@ -2043,8 +2071,7 @@ impl ContextEditor {
                     .collect::<Vec<_>>();
 
                 for tool_use in pending_tool_uses {
-                    let tool_registry = ToolRegistry::global(cx);
-                    if let Some(tool) = tool_registry.tool(&tool_use.name) {
+                    if let Some(tool) = self.tools.tool(&tool_use.name, cx) {
                         let task = tool.run(tool_use.input, self.workspace.clone(), cx);
 
                         self.context.update(cx, |context, cx| {
@@ -2108,10 +2135,9 @@ impl ContextEditor {
 
     fn update_invoked_slash_command(
         &mut self,
-        command_id: SlashCommandId,
+        command_id: InvokedSlashCommandId,
         cx: &mut ViewContext<Self>,
     ) {
-        let context_editor = cx.view().downgrade();
         self.editor.update(cx, |editor, cx| {
             if let Some(invoked_slash_command) =
                 self.context.read(cx).invoked_slash_command(&command_id)
@@ -2152,7 +2178,7 @@ impl ContextEditor {
                         .anchor_in_excerpt(excerpt_id, invoked_slash_command.range.end)
                         .unwrap();
                     let fold_placeholder =
-                        invoked_slash_command_fold_placeholder(command_id, context, context_editor);
+                        invoked_slash_command_fold_placeholder(command_id, context);
                     let crease_ids = editor.insert_creases(
                         [Crease::new(
                             crease_start..crease_end,
@@ -2352,6 +2378,7 @@ impl ContextEditor {
                                 section.icon,
                                 section.label.clone(),
                             ),
+                            merge_adjacent: false,
                             ..Default::default()
                         },
                         render_slash_command_output_toggle,
@@ -3719,6 +3746,19 @@ impl ContextEditor {
             })
     }
 
+    fn render_inject_context_menu(&self, cx: &mut ViewContext<Self>) -> impl IntoElement {
+        slash_command_picker::SlashCommandSelector::new(
+            self.slash_commands.clone(),
+            cx.view().downgrade(),
+            Button::new("trigger", "Add Context")
+                .icon(IconName::Plus)
+                .icon_size(IconSize::Small)
+                .icon_color(Color::Muted)
+                .icon_position(IconPosition::Start)
+                .tooltip(|cx| Tooltip::text("Type / to insert via keyboard", cx)),
+        )
+    }
+
     fn render_last_error(&self, cx: &mut ViewContext<Self>) -> Option<AnyElement> {
         let last_error = self.last_error.as_ref()?;
 
@@ -4133,11 +4173,7 @@ impl Render for ContextEditor {
                         .border_t_1()
                         .border_color(cx.theme().colors().border_variant)
                         .bg(cx.theme().colors().editor_background)
-                        .child(
-                            h_flex()
-                                .gap_1()
-                                .child(render_inject_context_menu(cx.view().downgrade(), cx)),
-                        )
+                        .child(h_flex().gap_1().child(self.render_inject_context_menu(cx)))
                         .child(
                             h_flex()
                                 .w_full()
@@ -4417,24 +4453,6 @@ pub struct ContextEditorToolbarItem {
     active_context_editor: Option<WeakView<ContextEditor>>,
     model_summary_editor: View<Editor>,
     model_selector_menu_handle: PopoverMenuHandle<Picker<ModelPickerDelegate>>,
-}
-
-fn render_inject_context_menu(
-    active_context_editor: WeakView<ContextEditor>,
-    cx: &mut WindowContext<'_>,
-) -> impl IntoElement {
-    let commands = SlashCommandRegistry::global(cx);
-
-    slash_command_picker::SlashCommandSelector::new(
-        commands.clone(),
-        active_context_editor,
-        Button::new("trigger", "Add Context")
-            .icon(IconName::Plus)
-            .icon_size(IconSize::Small)
-            .icon_color(Color::Muted)
-            .icon_position(IconPosition::Start)
-            .tooltip(|cx| Tooltip::text("Type / to insert via keyboard", cx)),
-    )
 }
 
 impl ContextEditorToolbarItem {
@@ -4963,6 +4981,7 @@ fn quote_selection_fold_placeholder(title: String, editor: WeakView<Editor>) -> 
                     .into_any_element()
             }
         }),
+        merge_adjacent: false,
         ..Default::default()
     }
 }
@@ -5094,9 +5113,8 @@ fn make_lsp_adapter_delegate(
 enum PendingSlashCommand {}
 
 fn invoked_slash_command_fold_placeholder(
-    command_id: SlashCommandId,
+    command_id: InvokedSlashCommandId,
     context: WeakModel<Context>,
-    context_editor: WeakView<ContextEditor>,
 ) -> FoldPlaceholder {
     FoldPlaceholder {
         constrain_width: false,
@@ -5126,37 +5144,11 @@ fn invoked_slash_command_fold_placeholder(
                             |icon, delta| icon.transform(Transformation::rotate(percentage(delta))),
                         ))
                     }
-                    InvokedSlashCommandStatus::Error(message) => parent
-                        .child(
-                            Label::new(format!("error: {message}"))
-                                .single_line()
-                                .color(Color::Error),
-                        )
-                        .child(
-                            IconButton::new("dismiss-error", IconName::Close)
-                                .shape(IconButtonShape::Square)
-                                .icon_size(IconSize::XSmall)
-                                .icon_color(Color::Muted)
-                                .on_click({
-                                    let context_editor = context_editor.clone();
-                                    move |_event, cx| {
-                                        context_editor
-                                            .update(cx, |context_editor, cx| {
-                                                context_editor.editor.update(cx, |editor, cx| {
-                                                    editor.remove_creases(
-                                                        HashSet::from_iter(
-                                                            context_editor
-                                                                .invoked_slash_command_creases
-                                                                .remove(&command_id),
-                                                        ),
-                                                        cx,
-                                                    );
-                                                })
-                                            })
-                                            .log_err();
-                                    }
-                                }),
-                        ),
+                    InvokedSlashCommandStatus::Error(message) => parent.child(
+                        Label::new(format!("error: {message}"))
+                            .single_line()
+                            .color(Color::Error),
+                    ),
                     InvokedSlashCommandStatus::Finished => parent,
                 })
                 .into_any_element()
