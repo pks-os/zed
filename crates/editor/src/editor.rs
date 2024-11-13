@@ -534,6 +534,12 @@ pub trait Addon: 'static {
     fn to_any(&self) -> &dyn std::any::Any;
 }
 
+#[derive(Debug, Copy, Clone, PartialEq, Eq)]
+pub enum IsVimMode {
+    Yes,
+    No,
+}
+
 /// Zed's primary text input `View`, allowing users to edit a [`MultiBuffer`]
 ///
 /// See the [module level documentation](self) for more information.
@@ -6313,6 +6319,8 @@ impl Editor {
         let mut row_ranges = Vec::<Range<MultiBufferRow>>::new();
         for selection in self.selections.all::<Point>(cx) {
             let start = MultiBufferRow(selection.start.row);
+            // Treat single line selections as if they include the next line. Otherwise this action
+            // would do nothing for single line selections individual cursors.
             let end = if selection.start.row == selection.end.row {
                 MultiBufferRow(selection.start.row + 1)
             } else {
@@ -7020,10 +7028,10 @@ impl Editor {
     }
 
     pub fn rewrap(&mut self, _: &Rewrap, cx: &mut ViewContext<Self>) {
-        self.rewrap_impl(true, cx)
+        self.rewrap_impl(IsVimMode::No, cx)
     }
 
-    pub fn rewrap_impl(&mut self, only_text: bool, cx: &mut ViewContext<Self>) {
+    pub fn rewrap_impl(&mut self, is_vim_mode: IsVimMode, cx: &mut ViewContext<Self>) {
         let buffer = self.buffer.read(cx).snapshot(cx);
         let selections = self.selections.all::<Point>(cx);
         let mut selections = selections.iter().peekable();
@@ -7044,7 +7052,7 @@ impl Editor {
                 continue;
             }
 
-            let mut should_rewrap = !only_text;
+            let mut should_rewrap = is_vim_mode == IsVimMode::Yes;
 
             if let Some(language_scope) = buffer.language_scope_at(selection.head()) {
                 match language_scope.language_name().0.as_ref() {
@@ -7156,7 +7164,12 @@ impl Editor {
                 tab_size,
             );
 
-            let diff = TextDiff::from_lines(&selection_text, &wrapped_text);
+            // TODO: should always use char-based diff while still supporting cursor behavior that
+            // matches vim.
+            let diff = match is_vim_mode {
+                IsVimMode::Yes => TextDiff::from_lines(&selection_text, &wrapped_text),
+                IsVimMode::No => TextDiff::from_chars(&selection_text, &wrapped_text),
+            };
             let mut offset = start.to_offset(&buffer);
             let mut moved_since_edit = true;
 
