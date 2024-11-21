@@ -28,7 +28,6 @@ mod hover_popover;
 mod hunk_diff;
 mod indent_guides;
 mod inlay_hint_cache;
-mod inline_completion_provider;
 pub mod items;
 mod linked_editing_ranges;
 mod lsp_ext;
@@ -87,7 +86,8 @@ pub(crate) use hunk_diff::HoveredHunk;
 use hunk_diff::{diff_hunk_to_display, ExpandedHunks};
 use indent_guides::ActiveIndentGuidesState;
 use inlay_hint_cache::{InlayHintCache, InlaySplice, InvalidationStrategy};
-pub use inline_completion_provider::*;
+pub use inline_completion::Direction;
+use inline_completion::{InlayProposal, InlineCompletionProvider, InlineCompletionProviderHandle};
 pub use items::MAX_TAB_TITLE_LEN;
 use itertools::Itertools;
 use language::{
@@ -272,12 +272,6 @@ enum DiffRowHighlight {}
 enum DocumentHighlightRead {}
 enum DocumentHighlightWrite {}
 enum InputComposition {}
-
-#[derive(Copy, Clone, PartialEq, Eq)]
-pub enum Direction {
-    Prev,
-    Next,
-}
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
 pub enum Navigated {
@@ -11875,7 +11869,15 @@ impl Editor {
         style: &EditorStyle,
         cx: &mut WindowContext,
     ) -> Option<AnyElement> {
-        if !self.newest_selection_head_on_empty_line(cx) || self.has_active_inline_completion(cx) {
+        let selection = self.selections.newest::<Point>(cx);
+        if !selection.is_empty() {
+            return None;
+        };
+
+        let snapshot = self.buffer.read(cx).snapshot(cx);
+        let buffer_row = MultiBufferRow(selection.head().row);
+
+        if snapshot.line_len(buffer_row) != 0 || self.has_active_inline_completion(cx) {
             return None;
         }
 

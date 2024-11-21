@@ -402,6 +402,7 @@ dependencies = [
  "indoc",
  "language",
  "language_model",
+ "language_models",
  "languages",
  "log",
  "lsp",
@@ -2107,9 +2108,9 @@ dependencies = [
 
 [[package]]
 name = "cargo_metadata"
-version = "0.18.1"
+version = "0.19.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2d886547e41f740c616ae73108f6eb70afe6d940c7bc697cb30f13daec073037"
+checksum = "afc309ed89476c8957c50fb818f56fe894db857866c3e163335faa91dc34eb85"
 dependencies = [
  "camino",
  "cargo-platform",
@@ -2876,6 +2877,7 @@ dependencies = [
  "gpui",
  "http_client",
  "indoc",
+ "inline_completion",
  "language",
  "lsp",
  "menu",
@@ -3350,9 +3352,9 @@ dependencies = [
 
 [[package]]
 name = "ctor"
-version = "0.2.8"
+version = "0.2.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "edb49164822f3ee45b17acd4a208cfc1251410cf0cad9a833234c9890774dd9f"
+checksum = "32a2785755761f3ddc1492979ce1e48d2c00d09311c39e4466429188f3dd6501"
 dependencies = [
  "quote",
  "syn 2.0.87",
@@ -3721,6 +3723,7 @@ dependencies = [
  "gpui",
  "http_client",
  "indoc",
+ "inline_completion",
  "itertools 0.13.0",
  "language",
  "linkify",
@@ -4218,6 +4221,7 @@ dependencies = [
  "vim",
  "wasmtime-wasi",
  "workspace",
+ "zed_actions",
 ]
 
 [[package]]
@@ -6056,6 +6060,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "inline_completion"
+version = "0.1.0"
+dependencies = [
+ "gpui",
+ "language",
+ "project",
+ "text",
+]
+
+[[package]]
 name = "inline_completion_button"
 version = "0.1.0"
 dependencies = [
@@ -6075,7 +6089,6 @@ dependencies = [
  "supermaven",
  "theme",
  "ui",
- "util",
  "workspace",
  "zed_actions",
 ]
@@ -6508,28 +6521,48 @@ dependencies = [
  "anthropic",
  "anyhow",
  "base64 0.22.1",
- "client",
  "collections",
- "copilot",
- "ctor",
- "editor",
- "env_logger 0.11.5",
- "feature_flags",
  "futures 0.3.31",
  "google_ai",
  "gpui",
  "http_client",
  "image",
- "inline_completion_button",
- "language",
  "log",
- "menu",
  "ollama",
  "open_ai",
  "parking_lot",
+ "proto",
+ "schemars",
+ "serde",
+ "serde_json",
+ "smol",
+ "strum 0.25.0",
+ "ui",
+ "util",
+]
+
+[[package]]
+name = "language_models"
+version = "0.1.0"
+dependencies = [
+ "anthropic",
+ "anyhow",
+ "client",
+ "collections",
+ "copilot",
+ "editor",
+ "feature_flags",
+ "fs",
+ "futures 0.3.31",
+ "google_ai",
+ "gpui",
+ "http_client",
+ "language_model",
+ "menu",
+ "ollama",
+ "open_ai",
  "project",
  "proto",
- "rand 0.8.5",
  "schemars",
  "serde",
  "serde_json",
@@ -6537,12 +6570,10 @@ dependencies = [
  "smol",
  "strum 0.25.0",
  "telemetry_events",
- "text",
  "theme",
  "thiserror 1.0.69",
  "tiktoken-rs",
  "ui",
- "unindent",
  "util",
 ]
 
@@ -6669,9 +6700,9 @@ checksum = "03087c2bad5e1034e8cace5926dec053fb3790248370865f5117a7d0213354c8"
 
 [[package]]
 name = "libc"
-version = "0.2.162"
+version = "0.2.164"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "18d287de67fe55fd7e1581fe933d965a5a9477b38e949cfa9f8574ef01506398"
+checksum = "433bfe06b8c75da9b2e3fbea6e5329ff87748f0b144ef75306e674c3f6f7c13f"
 
 [[package]]
 name = "libdbus-sys"
@@ -9673,6 +9704,7 @@ dependencies = [
  "ui",
  "util",
  "workspace",
+ "zed_actions",
 ]
 
 [[package]]
@@ -10853,9 +10885,9 @@ dependencies = [
 
 [[package]]
 name = "serde_json"
-version = "1.0.132"
+version = "1.0.133"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d726bfaff4b320266d395898905d0eba0345aae23b54aee3a737e260fd46db03"
+checksum = "c7fceb2473b9166b2294ef05efcb65a3db80803f0b03ef86a5fc88a2b85ee377"
 dependencies = [
  "indexmap 2.6.0",
  "itoa",
@@ -11782,6 +11814,7 @@ dependencies = [
  "futures 0.3.31",
  "gpui",
  "http_client",
+ "inline_completion",
  "language",
  "log",
  "postage",
@@ -12163,6 +12196,7 @@ dependencies = [
  "ui",
  "util",
  "workspace",
+ "zed_actions",
 ]
 
 [[package]]
@@ -12266,7 +12300,6 @@ dependencies = [
  "shellexpand 2.1.2",
  "smol",
  "task",
- "tasks_ui",
  "terminal",
  "theme",
  "ui",
@@ -12575,7 +12608,6 @@ dependencies = [
  "collections",
  "command_palette",
  "editor",
- "extensions_ui",
  "feature_flags",
  "feedback",
  "gpui",
@@ -12583,7 +12615,6 @@ dependencies = [
  "notifications",
  "pretty_assertions",
  "project",
- "recent_projects",
  "remote",
  "rpc",
  "serde",
@@ -14356,12 +14387,11 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "client",
+ "copilot",
  "db",
  "editor",
- "extensions_ui",
  "fuzzy",
  "gpui",
- "inline_completion_button",
  "install_cli",
  "picker",
  "project",
@@ -15422,7 +15452,7 @@ dependencies = [
 
 [[package]]
 name = "zed"
-version = "0.163.0"
+version = "0.164.0"
 dependencies = [
  "activity_indicator",
  "anyhow",
@@ -15471,6 +15501,7 @@ dependencies = [
  "journal",
  "language",
  "language_model",
+ "language_models",
  "language_selector",
  "language_tools",
  "languages",

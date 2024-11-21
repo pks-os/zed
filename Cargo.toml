@@ -49,11 +49,13 @@ members = [
     "crates/http_client",
     "crates/image_viewer",
     "crates/indexed_docs",
+    "crates/inline_completion",
     "crates/inline_completion_button",
     "crates/install_cli",
     "crates/journal",
     "crates/language",
     "crates/language_model",
+    "crates/language_models",
     "crates/language_selector",
     "crates/language_tools",
     "crates/languages",
@@ -221,11 +223,13 @@ html_to_markdown = { path = "crates/html_to_markdown" }
 http_client = { path = "crates/http_client" }
 image_viewer = { path = "crates/image_viewer" }
 indexed_docs = { path = "crates/indexed_docs" }
+inline_completion = { path = "crates/inline_completion" }
 inline_completion_button = { path = "crates/inline_completion_button" }
 install_cli = { path = "crates/install_cli" }
 journal = { path = "crates/journal" }
 language = { path = "crates/language" }
 language_model = { path = "crates/language_model" }
+language_models = { path = "crates/language_models" }
 language_selector = { path = "crates/language_selector" }
 language_tools = { path = "crates/language_tools" }
 languages = { path = "crates/languages" }
@@ -332,7 +336,7 @@ blade-macros = { git = "https://github.com/kvark/blade", rev = "e142a3a5e678eb6a
 blade-util = { git = "https://github.com/kvark/blade", rev = "e142a3a5e678eb6a13e642ad8401b1f3aa38e969" }
 blake3 = "1.5.3"
 bytes = "1.0"
-cargo_metadata = "0.18"
+cargo_metadata = "0.19"
 cargo_toml = "0.20"
 chrono = { version = "0.4", features = ["serde"] }
 clap = { version = "4.4", features = ["derive"] }
