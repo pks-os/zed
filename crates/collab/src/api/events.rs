@@ -1420,8 +1420,6 @@ fn for_snowflake(
                     "enable screen share" => "Screen Share Enabled".to_string(),
                     "disable screen share" => "Screen Share Disabled".to_string(),
                     "decline incoming" => "Incoming Call Declined".to_string(),
-                    "enable camera" => "Camera Enabled".to_string(),
-                    "disable camera" => "Camera Disabled".to_string(),
                     _ => format!("Unknown Call Event: {}", e.operation),
                 };
 
@@ -1578,8 +1576,8 @@ fn for_snowflake(
     })
 }
 
-#[derive(Serialize, Deserialize)]
-struct SnowflakeRow {
+#[derive(Serialize, Deserialize, Debug)]
+pub struct SnowflakeRow {
     pub time: chrono::DateTime<chrono::Utc>,
     pub user_id: Option<String>,
     pub device_id: Option<String>,
@@ -1587,4 +1585,43 @@ struct SnowflakeRow {
     pub event_properties: serde_json::Value,
     pub user_properties: Option<serde_json::Value>,
     pub insert_id: Option<String>,
+}
+
+impl SnowflakeRow {
+    pub fn new(
+        event_type: impl Into<String>,
+        metrics_id: Option<Uuid>,
+        is_staff: bool,
+        system_id: Option<String>,
+        event_properties: serde_json::Value,
+    ) -> Self {
+        Self {
+            time: chrono::Utc::now(),
+            event_type: event_type.into(),
+            device_id: system_id,
+            user_id: metrics_id.map(|id| id.to_string()),
+            insert_id: Some(uuid::Uuid::new_v4().to_string()),
+            event_properties,
+            user_properties: Some(json!({"is_staff": is_staff})),
+        }
+    }
+
+    pub async fn write(
+        self,
+        client: &Option<aws_sdk_kinesis::Client>,
+        stream: &Option<String>,
+    ) -> anyhow::Result<()> {
+        let Some((client, stream)) = client.as_ref().zip(stream.as_ref()) else {
+            return Ok(());
+        };
+        let row = serde_json::to_vec(&self)?;
+        client
+            .put_record()
+            .stream_name(stream)
+            .partition_key(&self.user_id.unwrap_or_default())
+            .data(row.into())
+            .send()
+            .await?;
+        Ok(())
+    }
 }
