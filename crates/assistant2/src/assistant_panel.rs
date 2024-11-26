@@ -1,16 +1,17 @@
 use anyhow::Result;
 use gpui::{
     prelude::*, px, Action, AppContext, AsyncWindowContext, EventEmitter, FocusHandle,
-    FocusableView, Pixels, Task, View, ViewContext, WeakView, WindowContext,
+    FocusableView, Model, Pixels, Subscription, Task, View, ViewContext, WeakView, WindowContext,
 };
 use language_model::LanguageModelRegistry;
 use language_model_selector::LanguageModelSelector;
 use ui::{prelude::*, ButtonLike, Divider, IconButtonShape, Tab, Tooltip};
 use workspace::dock::{DockPosition, Panel, PanelEvent};
-use workspace::{Pane, Workspace};
+use workspace::Workspace;
 
-use crate::chat_editor::ChatEditor;
-use crate::{NewChat, ToggleFocus, ToggleModelSelector};
+use crate::message_editor::MessageEditor;
+use crate::thread::Thread;
+use crate::{NewThread, ToggleFocus, ToggleModelSelector};
 
 pub fn init(cx: &mut AppContext) {
     cx.observe_new_views(
@@ -24,8 +25,9 @@ pub fn init(cx: &mut AppContext) {
 }
 
 pub struct AssistantPanel {
-    pane: View<Pane>,
-    chat_editor: View<ChatEditor>,
+    thread: Model<Thread>,
+    message_editor: View<MessageEditor>,
+    _subscriptions: Vec<Subscription>,
 }
 
 impl AssistantPanel {
@@ -40,32 +42,32 @@ impl AssistantPanel {
         })
     }
 
-    fn new(workspace: &Workspace, cx: &mut ViewContext<Self>) -> Self {
-        let pane = cx.new_view(|cx| {
-            let mut pane = Pane::new(
-                workspace.weak_handle(),
-                workspace.project().clone(),
-                Default::default(),
-                None,
-                NewChat.boxed_clone(),
-                cx,
-            );
-            pane.set_can_split(false, cx);
-            pane.set_can_navigate(true, cx);
-
-            pane
-        });
+    fn new(_workspace: &Workspace, cx: &mut ViewContext<Self>) -> Self {
+        let thread = cx.new_model(Thread::new);
+        let subscriptions = vec![cx.observe(&thread, |_, _, cx| cx.notify())];
 
         Self {
-            pane,
-            chat_editor: cx.new_view(ChatEditor::new),
+            thread: thread.clone(),
+            message_editor: cx.new_view(|cx| MessageEditor::new(thread, cx)),
+            _subscriptions: subscriptions,
         }
+    }
+
+    fn new_thread(&mut self, cx: &mut ViewContext<Self>) {
+        let thread = cx.new_model(Thread::new);
+        let subscriptions = vec![cx.observe(&thread, |_, _, cx| cx.notify())];
+
+        self.message_editor = cx.new_view(|cx| MessageEditor::new(thread.clone(), cx));
+        self.thread = thread;
+        self._subscriptions = subscriptions;
+
+        self.message_editor.focus_handle(cx).focus(cx);
     }
 }
 
 impl FocusableView for AssistantPanel {
     fn focus_handle(&self, cx: &AppContext) -> FocusHandle {
-        self.pane.focus_handle(cx)
+        self.message_editor.focus_handle(cx)
     }
 }
 
@@ -92,19 +94,7 @@ impl Panel for AssistantPanel {
 
     fn set_size(&mut self, _size: Option<Pixels>, _cx: &mut ViewContext<Self>) {}
 
-    fn is_zoomed(&self, cx: &WindowContext) -> bool {
-        self.pane.read(cx).is_zoomed()
-    }
-
-    fn set_zoomed(&mut self, zoomed: bool, cx: &mut ViewContext<Self>) {
-        self.pane.update(cx, |pane, cx| pane.set_zoomed(zoomed, cx));
-    }
-
     fn set_active(&mut self, _active: bool, _cx: &mut ViewContext<Self>) {}
-
-    fn pane(&self) -> Option<View<Pane>> {
-        Some(self.pane.clone())
-    }
 
     fn remote_id() -> Option<proto::PanelId> {
         Some(proto::PanelId::AssistantPanel)
@@ -136,25 +126,30 @@ impl AssistantPanel {
             .bg(cx.theme().colors().tab_bar_background)
             .border_b_1()
             .border_color(cx.theme().colors().border_variant)
-            .child(h_flex().child(Label::new("Chat Title Goes Here")))
+            .child(h_flex().child(Label::new("Thread Title Goes Here")))
             .child(
                 h_flex()
                     .gap(DynamicSpacing::Base08.rems(cx))
                     .child(self.render_language_model_selector(cx))
                     .child(Divider::vertical())
                     .child(
-                        IconButton::new("new-chat", IconName::Plus)
+                        IconButton::new("new-thread", IconName::Plus)
                             .shape(IconButtonShape::Square)
                             .icon_size(IconSize::Small)
                             .style(ButtonStyle::Subtle)
                             .tooltip({
                                 let focus_handle = focus_handle.clone();
                                 move |cx| {
-                                    Tooltip::for_action_in("New Chat", &NewChat, &focus_handle, cx)
+                                    Tooltip::for_action_in(
+                                        "New Thread",
+                                        &NewThread,
+                                        &focus_handle,
+                                        cx,
+                                    )
                                 }
                             })
                             .on_click(move |_event, _cx| {
-                                println!("New Chat");
+                                println!("New Thread");
                             }),
                     )
                     .child(
@@ -238,16 +233,33 @@ impl Render for AssistantPanel {
             .key_context("AssistantPanel2")
             .justify_between()
             .size_full()
-            .on_action(cx.listener(|_this, _: &NewChat, _cx| {
-                println!("Action: New Chat");
+            .on_action(cx.listener(|this, _: &NewThread, cx| {
+                this.new_thread(cx);
             }))
             .child(self.render_toolbar(cx))
-            .child(v_flex().bg(cx.theme().colors().panel_background))
+            .child(
+                v_flex()
+                    .id("message-list")
+                    .gap_2()
+                    .size_full()
+                    .p_2()
+                    .overflow_y_scroll()
+                    .bg(cx.theme().colors().panel_background)
+                    .children(self.thread.read(cx).messages().map(|message| {
+                        v_flex()
+                            .p_2()
+                            .border_1()
+                            .border_color(cx.theme().colors().border_variant)
+                            .rounded_md()
+                            .child(Label::new(message.role.to_string()))
+                            .child(Label::new(message.text.clone()))
+                    })),
+            )
             .child(
                 h_flex()
                     .border_t_1()
                     .border_color(cx.theme().colors().border_variant)
-                    .child(self.chat_editor.clone()),
+                    .child(self.message_editor.clone()),
             )
     }
 }
