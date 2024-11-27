@@ -455,6 +455,8 @@ name = "assistant2"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "assistant_tool",
+ "collections",
  "command_palette_hooks",
  "editor",
  "feature_flags",
@@ -463,6 +465,8 @@ dependencies = [
  "language_model",
  "language_model_selector",
  "proto",
+ "serde",
+ "serde_json",
  "settings",
  "smol",
  "theme",
@@ -13828,6 +13832,7 @@ dependencies = [
  "serde_derive",
  "serde_json",
  "settings",
+ "theme",
  "tokio",
  "ui",
  "util",
