@@ -27,11 +27,11 @@ const VERTICAL_MIN_SIZE: f32 = 100.;
 /// Single-pane group is a regular pane.
 #[derive(Clone)]
 pub struct PaneGroup {
-    pub(crate) root: Member,
+    pub root: Member,
 }
 
 impl PaneGroup {
-    pub(crate) fn with_root(root: Member) -> Self {
+    pub fn with_root(root: Member) -> Self {
         Self { root }
     }
 
@@ -105,6 +105,15 @@ impl PaneGroup {
         };
     }
 
+    pub fn reset_pane_sizes(&mut self) {
+        match &mut self.root {
+            Member::Pane(_) => {}
+            Member::Axis(axis) => {
+                let _ = axis.reset_pane_sizes();
+            }
+        };
+    }
+
     pub fn swap(&mut self, from: &View<Pane>, to: &View<Pane>) {
         match &mut self.root {
             Member::Pane(_) => {}
@@ -113,7 +122,7 @@ impl PaneGroup {
     }
 
     #[allow(clippy::too_many_arguments)]
-    pub(crate) fn render(
+    pub fn render(
         &self,
         project: &Model<Project>,
         follower_states: &HashMap<PeerId, FollowerState>,
@@ -135,19 +144,51 @@ impl PaneGroup {
         )
     }
 
-    pub(crate) fn panes(&self) -> Vec<&View<Pane>> {
+    pub fn panes(&self) -> Vec<&View<Pane>> {
         let mut panes = Vec::new();
         self.root.collect_panes(&mut panes);
         panes
     }
 
-    pub(crate) fn first_pane(&self) -> View<Pane> {
+    pub fn first_pane(&self) -> View<Pane> {
         self.root.first_pane()
+    }
+
+    pub fn find_pane_in_direction(
+        &mut self,
+        active_pane: &View<Pane>,
+        direction: SplitDirection,
+        cx: &WindowContext,
+    ) -> Option<&View<Pane>> {
+        let bounding_box = self.bounding_box_for_pane(active_pane)?;
+        let cursor = active_pane.read(cx).pixel_position_of_cursor(cx);
+        let center = match cursor {
+            Some(cursor) if bounding_box.contains(&cursor) => cursor,
+            _ => bounding_box.center(),
+        };
+
+        let distance_to_next = crate::HANDLE_HITBOX_SIZE;
+
+        let target = match direction {
+            SplitDirection::Left => {
+                Point::new(bounding_box.left() - distance_to_next.into(), center.y)
+            }
+            SplitDirection::Right => {
+                Point::new(bounding_box.right() + distance_to_next.into(), center.y)
+            }
+            SplitDirection::Up => {
+                Point::new(center.x, bounding_box.top() - distance_to_next.into())
+            }
+            SplitDirection::Down => {
+                Point::new(center.x, bounding_box.bottom() + distance_to_next.into())
+            }
+        };
+        self.pane_at_pixel_position(target)
     }
 }
 
-#[derive(Clone)]
-pub(crate) enum Member {
+#[derive(Debug, Clone)]
+pub enum Member {
     Axis(PaneAxis),
     Pane(View<Pane>),
 }
@@ -350,8 +391,8 @@ impl Member {
     }
 }
 
-#[derive(Clone)]
-pub(crate) struct PaneAxis {
+#[derive(Debug, Clone)]
+pub struct PaneAxis {
     pub axis: Axis,
     pub members: Vec<Member>,
     pub flexes: Arc<Mutex<Vec<f32>>>,
@@ -457,6 +498,15 @@ impl PaneAxis {
             }
         } else {
             Err(anyhow!("Pane not found"))
+        }
+    }
+
+    fn reset_pane_sizes(&self) {
+        *self.flexes.lock() = vec![1.; self.members.len()];
+        for member in self.members.iter() {
+            if let Member::Axis(axis) = member {
+                axis.reset_pane_sizes();
+            }
         }
     }
 
@@ -759,7 +809,6 @@ pub enum ResizeIntent {
 }
 
 mod element {
-
     use std::mem;
     use std::{cell::RefCell, iter, rc::Rc, sync::Arc};
 
