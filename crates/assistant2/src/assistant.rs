@@ -1,4 +1,6 @@
+mod active_thread;
 mod assistant_panel;
+mod context_picker;
 mod message_editor;
 mod thread;
 mod thread_store;
@@ -11,7 +13,13 @@ pub use crate::assistant_panel::AssistantPanel;
 
 actions!(
     assistant2,
-    [ToggleFocus, NewThread, ToggleModelSelector, Chat]
+    [
+        ToggleFocus,
+        NewThread,
+        ToggleModelSelector,
+        OpenHistory,
+        Chat
+    ]
 );
 
 const NAMESPACE: &str = "assistant2";

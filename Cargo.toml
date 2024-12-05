@@ -391,6 +391,7 @@ jsonwebtoken = "9.3"
 jupyter-protocol = { version = "0.5.0" }
 jupyter-websocket-client = { version = "0.8.0" }
 libc = "0.2"
+libsqlite3-sys = { version = "0.30.1", features = ["bundled"] }
 linkify = "0.10.0"
 log = { version = "0.4.16", features = ["kv_unstable_serde", "serde"] }
 markup5ever_rcdom = "0.3.0"
@@ -672,6 +673,7 @@ new_ret_no_self = { level = "allow" }
 # We have a few `next` functions that differ in lifetimes
 # compared to Iterator::next. Yet, clippy complains about those.
 should_implement_trait = { level = "allow" }
+let_underscore_future = "allow"
 
 [workspace.metadata.cargo-machete]
 ignored = ["bindgen", "cbindgen", "prost_build", "serde"]
