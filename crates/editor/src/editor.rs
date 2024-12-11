@@ -3684,7 +3684,7 @@ impl Editor {
 
                     if editor.focus_handle.is_focused(cx) && menu.is_some() {
                         let mut menu = menu.unwrap();
-                        menu.resolve_selected_completion(editor.completion_provider.as_deref(), cx);
+                        menu.resolve_visible_completions(editor.completion_provider.as_deref(), cx);
                         *context_menu = Some(CodeContextMenu::Completions(menu));
                         drop(context_menu);
                         editor.discard_inline_completion(false, cx);
@@ -11879,7 +11879,10 @@ impl Editor {
                                 let buffer = buffer.read(cx);
                                 let language = buffer.language()?;
                                 if project.is_local()
-                                    && project.language_servers_for_buffer(buffer, cx).count() == 0
+                                    && project
+                                        .language_servers_for_local_buffer(buffer, cx)
+                                        .count()
+                                        == 0
                                 {
                                     None
                                 } else {
@@ -13393,7 +13396,7 @@ impl SemanticsProvider for Model<Project> {
     fn supports_inlay_hints(&self, buffer: &Model<Buffer>, cx: &AppContext) -> bool {
         // TODO: make this work for remote projects
         self.read(cx)
-            .language_servers_for_buffer(buffer.read(cx), cx)
+            .language_servers_for_local_buffer(buffer.read(cx), cx)
             .any(
                 |(_, server)| match server.capabilities().inlay_hint_provider {
                     Some(lsp::OneOf::Left(enabled)) => enabled,
