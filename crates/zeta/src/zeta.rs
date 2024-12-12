@@ -6,7 +6,10 @@ use anyhow::{anyhow, Context as _, Result};
 use client::Client;
 use collections::{HashMap, HashSet, VecDeque};
 use futures::AsyncReadExt;
-use gpui::{actions, AppContext, Context, Global, Model, ModelContext, Subscription, Task};
+use gpui::{
+    actions, AppContext, AsyncAppContext, Context, EntityId, Global, Model, ModelContext,
+    Subscription, Task,
+};
 use http_client::{HttpClient, Method};
 use language::{
     language_settings::all_language_settings, Anchor, Buffer, BufferSnapshot, OffsetRangeExt,
@@ -18,6 +21,7 @@ use std::{
     borrow::Cow,
     cmp,
     fmt::Write,
+    future::Future,
     mem,
     ops::Range,
     path::Path,
@@ -253,12 +257,17 @@ impl Zeta {
         }
     }
 
-    pub fn request_completion(
+    pub fn request_completion_impl<F, R>(
         &mut self,
         buffer: &Model<Buffer>,
         position: language::Anchor,
         cx: &mut ModelContext<Self>,
-    ) -> Task<Result<InlineCompletion>> {
+        perform_predict_edits: F,
+    ) -> Task<Result<InlineCompletion>>
+    where
+        F: FnOnce(Arc<Client>, LlmApiToken, PredictEditsParams) -> R + 'static,
+        R: Future<Output = Result<PredictEditsResponse>> + Send + 'static,
+    {
         let snapshot = self.report_changes_for_buffer(buffer, cx);
         let point = position.to_point(&snapshot);
         let offset = point.to_offset(&snapshot);
@@ -292,7 +301,7 @@ impl Zeta {
                 input_excerpt: input_excerpt.clone(),
             };
 
-            let response = Self::perform_predict_edits(&client, llm_token, body).await?;
+            let response = perform_predict_edits(client, llm_token, body).await?;
 
             let output_excerpt = response.output_excerpt;
             log::debug!("prediction took: {:?}", start.elapsed());
@@ -305,7 +314,9 @@ impl Zeta {
                 path,
                 input_events,
                 input_excerpt,
-            )?;
+                &cx,
+            )
+            .await?;
 
             this.update(&mut cx, |this, cx| {
                 this.recent_completions
@@ -320,50 +331,210 @@ impl Zeta {
         })
     }
 
-    async fn perform_predict_edits(
-        client: &Arc<Client>,
+    // Generates several example completions of various states to fill the Zeta completion modal
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn fill_with_fake_completions(&mut self, cx: &mut ModelContext<Self>) -> Task<()> {
+        let test_buffer_text = indoc::indoc! {r#"a longggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggg line
+            And maybe a short line
+
+            Then a few lines
+
+            and then another
+            "#};
+
+        let buffer = cx.new_model(|cx| Buffer::local(test_buffer_text, cx));
+        let position = buffer.read(cx).anchor_before(Point::new(1, 0));
+
+        let completion_tasks = vec![
+            self.fake_completion(
+                &buffer,
+                position,
+                PredictEditsResponse {
+                    output_excerpt: format!("{EDITABLE_REGION_START_MARKER}
+a longggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggg line
+[here's an edit]
+And maybe a short line
+Then a few lines
+and then another
+{EDITABLE_REGION_END_MARKER}
+                        ", ),
+                },
+                cx,
+            ),
+            self.fake_completion(
+                &buffer,
+                position,
+                PredictEditsResponse {
+                    output_excerpt: format!(r#"{EDITABLE_REGION_START_MARKER}
+a longggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggg line
+And maybe a short line
+[and another edit]
+Then a few lines
+and then another
+{EDITABLE_REGION_END_MARKER}
+                        "#),
+                },
+                cx,
+            ),
+            self.fake_completion(
+                &buffer,
+                position,
+                PredictEditsResponse {
+                    output_excerpt: format!(r#"{EDITABLE_REGION_START_MARKER}
+a longggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggg line
+And maybe a short line
+
+Then a few lines
+
+and then another
+{EDITABLE_REGION_END_MARKER}
+                        "#),
+                },
+                cx,
+            ),
+            self.fake_completion(
+                &buffer,
+                position,
+                PredictEditsResponse {
+                    output_excerpt: format!(r#"{EDITABLE_REGION_START_MARKER}
+a longggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggg line
+And maybe a short line
+
+Then a few lines
+
+and then another
+{EDITABLE_REGION_END_MARKER}
+                        "#),
+                },
+                cx,
+            ),
+            self.fake_completion(
+                &buffer,
+                position,
+                PredictEditsResponse {
+                    output_excerpt: format!(r#"{EDITABLE_REGION_START_MARKER}
+a longggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggg line
+And maybe a short line
+Then a few lines
+[a third completion]
+and then another
+{EDITABLE_REGION_END_MARKER}
+                        "#),
+                },
+                cx,
+            ),
+            self.fake_completion(
+                &buffer,
+                position,
+                PredictEditsResponse {
+                    output_excerpt: format!(r#"{EDITABLE_REGION_START_MARKER}
+a longggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggg line
+And maybe a short line
+and then another
+[fourth completion example]
+{EDITABLE_REGION_END_MARKER}
+                        "#),
+                },
+                cx,
+            ),
+            self.fake_completion(
+                &buffer,
+                position,
+                PredictEditsResponse {
+                    output_excerpt: format!(r#"{EDITABLE_REGION_START_MARKER}
+a longggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggg line
+And maybe a short line
+Then a few lines
+and then another
+[fifth and final completion]
+{EDITABLE_REGION_END_MARKER}
+                        "#),
+                },
+                cx,
+            ),
+        ];
+
+        cx.spawn(|zeta, mut cx| async move {
+            for task in completion_tasks {
+                task.await.unwrap();
+            }
+
+            zeta.update(&mut cx, |zeta, _cx| {
+                zeta.recent_completions.get_mut(2).unwrap().edits = Arc::new([]);
+                zeta.recent_completions.get_mut(3).unwrap().edits = Arc::new([]);
+            })
+            .ok();
+        })
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn fake_completion(
+        &mut self,
+        buffer: &Model<Buffer>,
+        position: language::Anchor,
+        response: PredictEditsResponse,
+        cx: &mut ModelContext<Self>,
+    ) -> Task<Result<InlineCompletion>> {
+        use std::future::ready;
+
+        self.request_completion_impl(buffer, position, cx, |_, _, _| ready(Ok(response)))
+    }
+
+    pub fn request_completion(
+        &mut self,
+        buffer: &Model<Buffer>,
+        position: language::Anchor,
+        cx: &mut ModelContext<Self>,
+    ) -> Task<Result<InlineCompletion>> {
+        self.request_completion_impl(buffer, position, cx, Self::perform_predict_edits)
+    }
+
+    fn perform_predict_edits(
+        client: Arc<Client>,
         llm_token: LlmApiToken,
         body: PredictEditsParams,
-    ) -> Result<PredictEditsResponse> {
-        let http_client = client.http_client();
-        let mut token = llm_token.acquire(client).await?;
-        let mut did_retry = false;
+    ) -> impl Future<Output = Result<PredictEditsResponse>> {
+        async move {
+            let http_client = client.http_client();
+            let mut token = llm_token.acquire(&client).await?;
+            let mut did_retry = false;
 
-        loop {
-            let request_builder = http_client::Request::builder();
-            let request = request_builder
-                .method(Method::POST)
-                .uri(
-                    http_client
-                        .build_zed_llm_url("/predict_edits", &[])?
-                        .as_ref(),
-                )
-                .header("Content-Type", "application/json")
-                .header("Authorization", format!("Bearer {}", token))
-                .body(serde_json::to_string(&body)?.into())?;
+            loop {
+                let request_builder = http_client::Request::builder();
+                let request = request_builder
+                    .method(Method::POST)
+                    .uri(
+                        http_client
+                            .build_zed_llm_url("/predict_edits", &[])?
+                            .as_ref(),
+                    )
+                    .header("Content-Type", "application/json")
+                    .header("Authorization", format!("Bearer {}", token))
+                    .body(serde_json::to_string(&body)?.into())?;
 
-            let mut response = http_client.send(request).await?;
+                let mut response = http_client.send(request).await?;
 
-            if response.status().is_success() {
-                let mut body = String::new();
-                response.body_mut().read_to_string(&mut body).await?;
-                return Ok(serde_json::from_str(&body)?);
-            } else if !did_retry
-                && response
-                    .headers()
-                    .get(EXPIRED_LLM_TOKEN_HEADER_NAME)
-                    .is_some()
-            {
-                did_retry = true;
-                token = llm_token.refresh(client).await?;
-            } else {
-                let mut body = String::new();
-                response.body_mut().read_to_string(&mut body).await?;
-                return Err(anyhow!(
-                    "error predicting edits.\nStatus: {:?}\nBody: {}",
-                    response.status(),
-                    body
-                ));
+                if response.status().is_success() {
+                    let mut body = String::new();
+                    response.body_mut().read_to_string(&mut body).await?;
+                    return Ok(serde_json::from_str(&body)?);
+                } else if !did_retry
+                    && response
+                        .headers()
+                        .get(EXPIRED_LLM_TOKEN_HEADER_NAME)
+                        .is_some()
+                {
+                    did_retry = true;
+                    token = llm_token.refresh(&client).await?;
+                } else {
+                    let mut body = String::new();
+                    response.body_mut().read_to_string(&mut body).await?;
+                    return Err(anyhow!(
+                        "error predicting edits.\nStatus: {:?}\nBody: {}",
+                        response.status(),
+                        body
+                    ));
+                }
             }
         }
     }
@@ -375,41 +546,45 @@ impl Zeta {
         path: Arc<Path>,
         input_events: String,
         input_excerpt: String,
-    ) -> Result<InlineCompletion> {
-        let content = output_excerpt.replace(CURSOR_MARKER, "");
+        cx: &AsyncAppContext,
+    ) -> Task<Result<InlineCompletion>> {
+        let snapshot = snapshot.clone();
+        cx.background_executor().spawn(async move {
+            let content = output_excerpt.replace(CURSOR_MARKER, "");
 
-        let codefence_start = content
-            .find(EDITABLE_REGION_START_MARKER)
-            .context("could not find start marker")?;
-        let content = &content[codefence_start..];
+            let codefence_start = content
+                .find(EDITABLE_REGION_START_MARKER)
+                .context("could not find start marker")?;
+            let content = &content[codefence_start..];
 
-        let newline_ix = content.find('\n').context("could not find newline")?;
-        let content = &content[newline_ix + 1..];
+            let newline_ix = content.find('\n').context("could not find newline")?;
+            let content = &content[newline_ix + 1..];
 
-        let codefence_end = content
-            .rfind(&format!("\n{EDITABLE_REGION_END_MARKER}"))
-            .context("could not find end marker")?;
-        let new_text = &content[..codefence_end];
+            let codefence_end = content
+                .rfind(&format!("\n{EDITABLE_REGION_END_MARKER}"))
+                .context("could not find end marker")?;
+            let new_text = &content[..codefence_end];
 
-        let old_text = snapshot
-            .text_for_range(excerpt_range.clone())
-            .collect::<String>();
+            let old_text = snapshot
+                .text_for_range(excerpt_range.clone())
+                .collect::<String>();
 
-        let edits = Self::compute_edits(old_text, new_text, excerpt_range.start, snapshot);
+            let edits = Self::compute_edits(old_text, new_text, excerpt_range.start, &snapshot);
 
-        Ok(InlineCompletion {
-            id: InlineCompletionId::new(),
-            path,
-            excerpt_range,
-            edits: edits.into(),
-            snapshot: snapshot.clone(),
-            input_events: input_events.into(),
-            input_excerpt: input_excerpt.into(),
-            output_excerpt: output_excerpt.into(),
+            Ok(InlineCompletion {
+                id: InlineCompletionId::new(),
+                path,
+                excerpt_range,
+                edits: edits.into(),
+                snapshot: snapshot.clone(),
+                input_events: input_events.into(),
+                input_excerpt: input_excerpt.into(),
+                output_excerpt: output_excerpt.into(),
+            })
         })
     }
 
-    fn compute_edits(
+    pub fn compute_edits(
         old_text: String,
         new_text: &str,
         offset: usize,
@@ -500,8 +675,12 @@ impl Zeta {
         cx.notify();
     }
 
-    pub fn recent_completions(&self) -> impl Iterator<Item = &InlineCompletion> {
+    pub fn recent_completions(&self) -> impl DoubleEndedIterator<Item = &InlineCompletion> {
         self.recent_completions.iter()
+    }
+
+    pub fn recent_completions_len(&self) -> usize {
+        self.recent_completions.len()
     }
 
     fn report_changes_for_buffer(
@@ -665,9 +844,14 @@ impl Event {
     }
 }
 
+struct CurrentInlineCompletion {
+    buffer_id: EntityId,
+    completion: InlineCompletion,
+}
+
 pub struct ZetaInlineCompletionProvider {
     zeta: Model<Zeta>,
-    current_completion: Option<InlineCompletion>,
+    current_completion: Option<CurrentInlineCompletion>,
     pending_refresh: Task<()>,
 }
 
@@ -708,28 +892,34 @@ impl inline_completion::InlineCompletionProvider for ZetaInlineCompletionProvide
         debounce: bool,
         cx: &mut ModelContext<Self>,
     ) {
-        self.pending_refresh = cx.spawn(|this, mut cx| async move {
-            if debounce {
-                cx.background_executor().timer(Self::DEBOUNCE_TIMEOUT).await;
-            }
+        self.pending_refresh =
+            cx.spawn(|this, mut cx| async move {
+                if debounce {
+                    cx.background_executor().timer(Self::DEBOUNCE_TIMEOUT).await;
+                }
 
-            let completion_request = this.update(&mut cx, |this, cx| {
-                this.zeta.update(cx, |zeta, cx| {
-                    zeta.request_completion(&buffer, position, cx)
+                let completion_request = this.update(&mut cx, |this, cx| {
+                    this.zeta.update(cx, |zeta, cx| {
+                        zeta.request_completion(&buffer, position, cx)
+                    })
+                });
+
+                let mut completion = None;
+                if let Ok(completion_request) = completion_request {
+                    completion = completion_request.await.log_err().map(|completion| {
+                        CurrentInlineCompletion {
+                            buffer_id: buffer.entity_id(),
+                            completion,
+                        }
+                    });
+                }
+
+                this.update(&mut cx, |this, cx| {
+                    this.current_completion = completion;
+                    cx.notify();
                 })
+                .ok();
             });
-
-            let mut completion = None;
-            if let Ok(completion_request) = completion_request {
-                completion = completion_request.await.log_err();
-            }
-
-            this.update(&mut cx, |this, cx| {
-                this.current_completion = completion;
-                cx.notify();
-            })
-            .ok();
-        });
     }
 
     fn cycle(
@@ -754,7 +944,16 @@ impl inline_completion::InlineCompletionProvider for ZetaInlineCompletionProvide
         cursor_position: language::Anchor,
         cx: &mut ModelContext<Self>,
     ) -> Option<inline_completion::InlineCompletion> {
-        let completion = self.current_completion.as_mut()?;
+        let CurrentInlineCompletion {
+            buffer_id,
+            completion,
+        } = self.current_completion.as_mut()?;
+
+        // Invalidate previous completion if it was generated for a different buffer.
+        if *buffer_id != buffer.entity_id() {
+            self.current_completion.take();
+            return None;
+        }
 
         let buffer = buffer.read(cx);
         let Some(edits) = completion.interpolate(buffer.snapshot()) else {
