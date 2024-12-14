@@ -176,7 +176,7 @@ use workspace::{
 };
 use workspace::{Item as WorkspaceItem, OpenInTerminal, OpenTerminal, TabBarSettings, Toast};
 
-use crate::hover_links::find_url;
+use crate::hover_links::{find_url, find_url_from_range};
 use crate::signature_help::{SignatureHelpHiddenBy, SignatureHelpState};
 
 pub const FILE_HEADER_HEIGHT: u32 = 2;
@@ -259,14 +259,14 @@ pub fn render_parsed_markdown(
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub(crate) enum InlayId {
-    Suggestion(usize),
+    InlineCompletion(usize),
     Hint(usize),
 }
 
 impl InlayId {
     fn id(&self) -> usize {
         match self {
-            Self::Suggestion(id) => *id,
+            Self::InlineCompletion(id) => *id,
             Self::Hint(id) => *id,
         }
     }
@@ -405,7 +405,7 @@ pub struct EditorStyle {
     pub syntax: Arc<SyntaxTheme>,
     pub status: StatusColors,
     pub inlay_hints_style: HighlightStyle,
-    pub suggestions_style: HighlightStyle,
+    pub inline_completion_styles: InlineCompletionStyles,
     pub unnecessary_code_fade: f32,
 }
 
@@ -422,7 +422,10 @@ impl Default for EditorStyle {
             // style and retrieve them directly from the theme.
             status: StatusColors::dark(),
             inlay_hints_style: HighlightStyle::default(),
-            suggestions_style: HighlightStyle::default(),
+            inline_completion_styles: InlineCompletionStyles {
+                insertion: HighlightStyle::default(),
+                whitespace: HighlightStyle::default(),
+            },
             unnecessary_code_fade: Default::default(),
         }
     }
@@ -437,6 +440,19 @@ pub fn make_inlay_hints_style(cx: &WindowContext) -> HighlightStyle {
         color: Some(cx.theme().status().hint),
         background_color: show_background.then(|| cx.theme().status().hint_background),
         ..HighlightStyle::default()
+    }
+}
+
+pub fn make_suggestion_styles(cx: &WindowContext) -> InlineCompletionStyles {
+    InlineCompletionStyles {
+        insertion: HighlightStyle {
+            color: Some(cx.theme().status().predictive),
+            ..HighlightStyle::default()
+        },
+        whitespace: HighlightStyle {
+            background_color: Some(cx.theme().status().created_background),
+            ..HighlightStyle::default()
+        },
     }
 }
 
@@ -1400,6 +1416,15 @@ impl Editor {
         if self.has_active_inline_completion() {
             key_context.add("copilot_suggestion");
             key_context.add("inline_completion");
+        }
+
+        if !self
+            .selections
+            .disjoint
+            .iter()
+            .all(|selection| selection.start == selection.end)
+        {
+            key_context.add("selection");
         }
 
         key_context
@@ -3711,7 +3736,7 @@ impl Editor {
 
                     if editor.focus_handle.is_focused(cx) && menu.is_some() {
                         let mut menu = menu.unwrap();
-                        menu.resolve_visible_completions(editor.completion_provider.as_deref(), cx);
+                        menu.resolve_selected_completion(editor.completion_provider.as_deref(), cx);
                         *context_menu = Some(CodeContextMenu::Completions(menu));
                         drop(context_menu);
                         cx.notify();
@@ -4726,7 +4751,7 @@ impl Editor {
             {
                 let mut inlays = Vec::new();
                 for (range, new_text) in &edits {
-                    let inlay = Inlay::suggestion(
+                    let inlay = Inlay::inline_completion(
                         post_inc(&mut self.next_inlay_id),
                         range.start,
                         new_text.as_str(),
@@ -4786,7 +4811,7 @@ impl Editor {
                     .shape(ui::IconButtonShape::Square)
                     .icon_size(IconSize::XSmall)
                     .icon_color(Color::Muted)
-                    .selected(is_active)
+                    .toggle_state(is_active)
                     .tooltip({
                         let focus_handle = self.focus_handle.clone();
                         move |cx| {
@@ -4963,7 +4988,7 @@ impl Editor {
             .shape(ui::IconButtonShape::Square)
             .icon_size(IconSize::XSmall)
             .icon_color(Color::Muted)
-            .selected(is_active)
+            .toggle_state(is_active)
             .on_click(cx.listener(move |editor, _e, cx| {
                 editor.focus(cx);
                 editor.toggle_code_actions(
@@ -6110,7 +6135,7 @@ impl Editor {
         });
     }
 
-    pub fn duplicate_line(&mut self, upwards: bool, cx: &mut ViewContext<Self>) {
+    pub fn duplicate(&mut self, upwards: bool, whole_lines: bool, cx: &mut ViewContext<Self>) {
         let display_map = self.display_map.update(cx, |map, cx| map.snapshot(cx));
         let buffer = &display_map.buffer_snapshot;
         let selections = self.selections.all::<Point>(cx);
@@ -6118,36 +6143,44 @@ impl Editor {
         let mut edits = Vec::new();
         let mut selections_iter = selections.iter().peekable();
         while let Some(selection) = selections_iter.next() {
-            // Avoid duplicating the same lines twice.
             let mut rows = selection.spanned_rows(false, &display_map);
-
-            while let Some(next_selection) = selections_iter.peek() {
-                let next_rows = next_selection.spanned_rows(false, &display_map);
-                if next_rows.start < rows.end {
-                    rows.end = next_rows.end;
-                    selections_iter.next().unwrap();
-                } else {
-                    break;
+            // duplicate line-wise
+            if whole_lines || selection.start == selection.end {
+                // Avoid duplicating the same lines twice.
+                while let Some(next_selection) = selections_iter.peek() {
+                    let next_rows = next_selection.spanned_rows(false, &display_map);
+                    if next_rows.start < rows.end {
+                        rows.end = next_rows.end;
+                        selections_iter.next().unwrap();
+                    } else {
+                        break;
+                    }
                 }
-            }
 
-            // Copy the text from the selected row region and splice it either at the start
-            // or end of the region.
-            let start = Point::new(rows.start.0, 0);
-            let end = Point::new(
-                rows.end.previous_row().0,
-                buffer.line_len(rows.end.previous_row()),
-            );
-            let text = buffer
-                .text_for_range(start..end)
-                .chain(Some("\n"))
-                .collect::<String>();
-            let insert_location = if upwards {
-                Point::new(rows.end.0, 0)
+                // Copy the text from the selected row region and splice it either at the start
+                // or end of the region.
+                let start = Point::new(rows.start.0, 0);
+                let end = Point::new(
+                    rows.end.previous_row().0,
+                    buffer.line_len(rows.end.previous_row()),
+                );
+                let text = buffer
+                    .text_for_range(start..end)
+                    .chain(Some("\n"))
+                    .collect::<String>();
+                let insert_location = if upwards {
+                    Point::new(rows.end.0, 0)
+                } else {
+                    start
+                };
+                edits.push((insert_location..insert_location, text));
             } else {
-                start
-            };
-            edits.push((insert_location..insert_location, text));
+                // duplicate character-wise
+                let start = selection.start;
+                let end = selection.end;
+                let text = buffer.text_for_range(start..end).collect::<String>();
+                edits.push((selection.end..selection.end, text));
+            }
         }
 
         self.transact(cx, |this, cx| {
@@ -6160,11 +6193,15 @@ impl Editor {
     }
 
     pub fn duplicate_line_up(&mut self, _: &DuplicateLineUp, cx: &mut ViewContext<Self>) {
-        self.duplicate_line(true, cx);
+        self.duplicate(true, true, cx);
     }
 
     pub fn duplicate_line_down(&mut self, _: &DuplicateLineDown, cx: &mut ViewContext<Self>) {
-        self.duplicate_line(false, cx);
+        self.duplicate(false, true, cx);
+    }
+
+    pub fn duplicate_selection(&mut self, _: &DuplicateSelection, cx: &mut ViewContext<Self>) {
+        self.duplicate(false, false, cx);
     }
 
     pub fn move_line_up(&mut self, _: &MoveLineUp, cx: &mut ViewContext<Self>) {
@@ -9262,23 +9299,42 @@ impl Editor {
     }
 
     pub fn open_url(&mut self, _: &OpenUrl, cx: &mut ViewContext<Self>) {
-        let position = self.selections.newest_anchor().head();
-        let Some((buffer, buffer_position)) =
-            self.buffer.read(cx).text_anchor_for_position(position, cx)
+        let selection = self.selections.newest_anchor();
+        let head = selection.head();
+        let tail = selection.tail();
+
+        let Some((buffer, start_position)) =
+            self.buffer.read(cx).text_anchor_for_position(head, cx)
         else {
             return;
         };
 
-        cx.spawn(|editor, mut cx| async move {
-            if let Some((_, url)) = find_url(&buffer, buffer_position, cx.clone()) {
+        let end_position = if head != tail {
+            let Some((_, pos)) = self.buffer.read(cx).text_anchor_for_position(tail, cx) else {
+                return;
+            };
+            Some(pos)
+        } else {
+            None
+        };
+
+        let url_finder = cx.spawn(|editor, mut cx| async move {
+            let url = if let Some(end_pos) = end_position {
+                find_url_from_range(&buffer, start_position..end_pos, cx.clone())
+            } else {
+                find_url(&buffer, start_position, cx.clone()).map(|(_, url)| url)
+            };
+
+            if let Some(url) = url {
                 editor.update(&mut cx, |_, cx| {
                     cx.open_url(&url);
                 })
             } else {
                 Ok(())
             }
-        })
-        .detach();
+        });
+
+        url_finder.detach();
     }
 
     pub fn open_file(&mut self, _: &OpenFile, cx: &mut ViewContext<Self>) {
@@ -9851,10 +9907,9 @@ impl Editor {
                                                     font_weight: Some(FontWeight::BOLD),
                                                     ..make_inlay_hints_style(cx)
                                                 },
-                                                suggestions_style: HighlightStyle {
-                                                    color: Some(cx.theme().status().predictive),
-                                                    ..HighlightStyle::default()
-                                                },
+                                                inline_completion_styles: make_suggestion_styles(
+                                                    cx,
+                                                ),
                                                 ..EditorStyle::default()
                                             },
                                         ))
@@ -13707,7 +13762,7 @@ impl EditorSnapshot {
         if folded || (is_foldable && (row_contains_cursor || self.gutter_hovered)) {
             Some(
                 Disclosure::new(("gutter_crease", buffer_row.0), !folded)
-                    .selected(folded)
+                    .toggle_state(folded)
                     .on_click(cx.listener_for(&editor, move |this, _e, cx| {
                         if folded {
                             this.unfold_at(&UnfoldAt { buffer_row }, cx);
@@ -13855,10 +13910,7 @@ impl Render for Editor {
                 syntax: cx.theme().syntax().clone(),
                 status: cx.theme().status().clone(),
                 inlay_hints_style: make_inlay_hints_style(cx),
-                suggestions_style: HighlightStyle {
-                    color: Some(cx.theme().status().predictive),
-                    ..HighlightStyle::default()
-                },
+                inline_completion_styles: make_suggestion_styles(cx),
                 unnecessary_code_fade: ThemeSettings::get_global(cx).unnecessary_code_fade,
             },
         )
