@@ -523,7 +523,7 @@ impl RunnableTasks {
     ) -> impl Iterator<Item = (TaskSourceKind, ResolvedTask)> + 'a {
         self.templates.iter().filter_map(|(kind, template)| {
             template
-                .resolve_task(&kind.to_id_base(), cx)
+                .resolve_task(&kind.to_id_base(), Default::default(), cx)
                 .map(|task| (kind.clone(), task))
         })
     }
@@ -9502,7 +9502,7 @@ impl Editor {
                         let location_tasks = definitions
                             .into_iter()
                             .map(|definition| match definition {
-                                HoverLink::Text(link) => Task::Ready(Some(Ok(Some(link.target)))),
+                                HoverLink::Text(link) => Task::ready(Ok(Some(link.target))),
                                 HoverLink::InlayHint(lsp_location, server_id) => {
                                     editor.compute_target_location(lsp_location, server_id, cx)
                                 }
@@ -9544,7 +9544,7 @@ impl Editor {
         cx: &mut ViewContext<Self>,
     ) -> Task<anyhow::Result<Option<Location>>> {
         let Some(project) = self.project.clone() else {
-            return Task::Ready(Some(Ok(None)));
+            return Task::ready(Ok(None));
         };
 
         cx.spawn(move |editor, mut cx| async move {
@@ -13293,7 +13293,7 @@ fn snippet_completions(
                 snippet
                     .prefix
                     .iter()
-                    .map(move |prefix| StringMatchCandidate::new(ix, prefix.clone()))
+                    .map(move |prefix| StringMatchCandidate::new(ix, &prefix))
             })
             .collect::<Vec<StringMatchCandidate>>();
 

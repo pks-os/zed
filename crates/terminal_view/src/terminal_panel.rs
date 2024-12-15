@@ -255,7 +255,10 @@ impl TerminalPanel {
             terminal_panel
                 .update(&mut cx, |_, cx| {
                     cx.subscribe(&workspace, |terminal_panel, _, e, cx| {
-                        if let workspace::Event::SpawnTask(spawn_in_terminal) = e {
+                        if let workspace::Event::SpawnTask {
+                            action: spawn_in_terminal,
+                        } = e
+                        {
                             terminal_panel.spawn_task(spawn_in_terminal, cx);
                         };
                     })
@@ -450,83 +453,17 @@ impl TerminalPanel {
 
     fn spawn_task(&mut self, spawn_in_terminal: &SpawnInTerminal, cx: &mut ViewContext<Self>) {
         let mut spawn_task = spawn_in_terminal.clone();
-        // Set up shell args unconditionally, as tasks are always spawned inside of a shell.
-        let Some((shell, mut user_args)) = (match spawn_in_terminal.shell.clone() {
-            Shell::System => {
-                match self
-                    .workspace
-                    .update(cx, |workspace, cx| workspace.project().read(cx).is_local())
-                {
-                    Ok(local) => {
-                        if local {
-                            retrieve_system_shell().map(|shell| (shell, Vec::new()))
-                        } else {
-                            Some(("\"${SHELL:-sh}\"".to_string(), Vec::new()))
-                        }
-                    }
-                    Err(_no_window_e) => return,
-                }
-            }
-            Shell::Program(shell) => Some((shell, Vec::new())),
-            Shell::WithArguments { program, args, .. } => Some((program, args)),
-        }) else {
+        let Ok(is_local) = self
+            .workspace
+            .update(cx, |workspace, cx| workspace.project().read(cx).is_local())
+        else {
             return;
         };
-        #[cfg(target_os = "windows")]
-        let windows_shell_type = to_windows_shell_type(&shell);
-
-        #[cfg(not(target_os = "windows"))]
+        if let ControlFlow::Break(_) =
+            Self::fill_command(is_local, spawn_in_terminal, &mut spawn_task)
         {
-            spawn_task.command_label = format!("{shell} -i -c '{}'", spawn_task.command_label);
+            return;
         }
-        #[cfg(target_os = "windows")]
-        {
-            use crate::terminal_panel::WindowsShellType;
-
-            match windows_shell_type {
-                WindowsShellType::Powershell => {
-                    spawn_task.command_label = format!("{shell} -C '{}'", spawn_task.command_label)
-                }
-                WindowsShellType::Cmd => {
-                    spawn_task.command_label = format!("{shell} /C '{}'", spawn_task.command_label)
-                }
-                WindowsShellType::Other => {
-                    spawn_task.command_label =
-                        format!("{shell} -i -c '{}'", spawn_task.command_label)
-                }
-            }
-        }
-
-        let task_command = std::mem::replace(&mut spawn_task.command, shell);
-        let task_args = std::mem::take(&mut spawn_task.args);
-        let combined_command = task_args
-            .into_iter()
-            .fold(task_command, |mut command, arg| {
-                command.push(' ');
-                #[cfg(not(target_os = "windows"))]
-                command.push_str(&arg);
-                #[cfg(target_os = "windows")]
-                command.push_str(&to_windows_shell_variable(windows_shell_type, arg));
-                command
-            });
-
-        #[cfg(not(target_os = "windows"))]
-        user_args.extend(["-i".to_owned(), "-c".to_owned(), combined_command]);
-        #[cfg(target_os = "windows")]
-        {
-            use crate::terminal_panel::WindowsShellType;
-
-            match windows_shell_type {
-                WindowsShellType::Powershell => {
-                    user_args.extend(["-C".to_owned(), combined_command])
-                }
-                WindowsShellType::Cmd => user_args.extend(["/C".to_owned(), combined_command]),
-                WindowsShellType::Other => {
-                    user_args.extend(["-i".to_owned(), "-c".to_owned(), combined_command])
-                }
-            }
-        }
-        spawn_task.args = user_args;
         let spawn_task = spawn_task;
 
         let allow_concurrent_runs = spawn_in_terminal.allow_concurrent_runs;
@@ -600,6 +537,81 @@ impl TerminalPanel {
             anyhow::Result::<_, anyhow::Error>::Ok(())
         })
         .detach()
+    }
+
+    pub fn fill_command(
+        is_local: bool,
+        spawn_in_terminal: &SpawnInTerminal,
+        spawn_task: &mut SpawnInTerminal,
+    ) -> ControlFlow<()> {
+        let Some((shell, mut user_args)) = (match spawn_in_terminal.shell.clone() {
+            Shell::System => {
+                if is_local {
+                    retrieve_system_shell().map(|shell| (shell, Vec::new()))
+                } else {
+                    Some(("\"${SHELL:-sh}\"".to_string(), Vec::new()))
+                }
+            }
+            Shell::Program(shell) => Some((shell, Vec::new())),
+            Shell::WithArguments { program, args, .. } => Some((program, args)),
+        }) else {
+            return ControlFlow::Break(());
+        };
+        #[cfg(target_os = "windows")]
+        let windows_shell_type = to_windows_shell_type(&shell);
+        #[cfg(not(target_os = "windows"))]
+        {
+            spawn_task.command_label = format!("{shell} -i -c '{}'", spawn_task.command_label);
+        }
+        #[cfg(target_os = "windows")]
+        {
+            use crate::terminal_panel::WindowsShellType;
+
+            match windows_shell_type {
+                WindowsShellType::Powershell => {
+                    spawn_task.command_label = format!("{shell} -C '{}'", spawn_task.command_label)
+                }
+                WindowsShellType::Cmd => {
+                    spawn_task.command_label = format!("{shell} /C '{}'", spawn_task.command_label)
+                }
+                WindowsShellType::Other => {
+                    spawn_task.command_label =
+                        format!("{shell} -i -c '{}'", spawn_task.command_label)
+                }
+            }
+        }
+        let task_command = std::mem::replace(&mut spawn_task.command, shell);
+        let task_args = std::mem::take(&mut spawn_task.args);
+        let combined_command = task_args
+            .into_iter()
+            .fold(task_command, |mut command, arg| {
+                command.push(' ');
+                #[cfg(not(target_os = "windows"))]
+                command.push_str(&arg);
+                #[cfg(target_os = "windows")]
+                command.push_str(&to_windows_shell_variable(windows_shell_type, arg));
+                command
+            });
+        #[cfg(not(target_os = "windows"))]
+        user_args.extend(["-i".to_owned(), "-c".to_owned(), combined_command]);
+        #[cfg(target_os = "windows")]
+        {
+            use crate::terminal_panel::WindowsShellType;
+
+            match windows_shell_type {
+                WindowsShellType::Powershell => {
+                    user_args.extend(["-C".to_owned(), combined_command])
+                }
+                WindowsShellType::Cmd => user_args.extend(["/C".to_owned(), combined_command]),
+                WindowsShellType::Other => {
+                    user_args.extend(["-i".to_owned(), "-c".to_owned(), combined_command])
+                }
+            }
+        }
+        spawn_task.args = user_args;
+        // Set up shell args unconditionally, as tasks are always spawned inside of a shell.
+
+        ControlFlow::Continue(())
     }
 
     pub fn spawn_in_new_terminal(
@@ -899,8 +911,7 @@ pub fn new_terminal_pane(
         pane.set_custom_drop_handle(cx, move |pane, dropped_item, cx| {
             if let Some(tab) = dropped_item.downcast_ref::<DraggedTab>() {
                 let this_pane = cx.view().clone();
-                let belongs_to_this_pane = tab.pane == this_pane;
-                let item = if belongs_to_this_pane {
+                let item = if tab.pane == this_pane {
                     pane.item_for_index(tab.ix)
                 } else {
                     tab.pane.read(cx).item_for_index(tab.ix)
@@ -910,53 +921,57 @@ pub fn new_terminal_pane(
                         let source = tab.pane.clone();
                         let item_id_to_move = item.item_id();
 
-                        let new_pane = pane.drag_split_direction().and_then(|split_direction| {
-                            terminal_panel.update(cx, |terminal_panel, cx| {
-                                let is_zoomed = if terminal_panel.active_pane == this_pane {
-                                    pane.is_zoomed()
-                                } else {
-                                    terminal_panel.active_pane.read(cx).is_zoomed()
-                                };
-                                let new_pane = new_terminal_pane(
-                                    workspace.clone(),
-                                    project.clone(),
-                                    is_zoomed,
-                                    cx,
-                                );
-                                terminal_panel.apply_tab_bar_buttons(&new_pane, cx);
-                                terminal_panel
-                                    .center
-                                    .split(&this_pane, &new_pane, split_direction)
-                                    .log_err()?;
-                                Some(new_pane)
+                        let new_split_pane = pane
+                            .drag_split_direction()
+                            .map(|split_direction| {
+                                terminal_panel.update(cx, |terminal_panel, cx| {
+                                    let is_zoomed = if terminal_panel.active_pane == this_pane {
+                                        pane.is_zoomed()
+                                    } else {
+                                        terminal_panel.active_pane.read(cx).is_zoomed()
+                                    };
+                                    let new_pane = new_terminal_pane(
+                                        workspace.clone(),
+                                        project.clone(),
+                                        is_zoomed,
+                                        cx,
+                                    );
+                                    terminal_panel.apply_tab_bar_buttons(&new_pane, cx);
+                                    terminal_panel.center.split(
+                                        &this_pane,
+                                        &new_pane,
+                                        split_direction,
+                                    )?;
+                                    anyhow::Ok(new_pane)
+                                })
                             })
-                        });
+                            .transpose();
 
-                        let destination;
-                        let destination_index;
-                        if let Some(new_pane) = new_pane {
-                            destination_index = new_pane.read(cx).active_item_index();
-                            destination = new_pane;
-                        } else if belongs_to_this_pane {
-                            return ControlFlow::Break(());
-                        } else {
-                            destination = cx.view().clone();
-                            destination_index = pane.active_item_index();
-                        }
-                        // Destination pane may be the one currently updated, so defer the move.
-                        cx.spawn(|_, mut cx| async move {
-                            cx.update(|cx| {
-                                move_item(
-                                    &source,
-                                    &destination,
-                                    item_id_to_move,
-                                    destination_index,
-                                    cx,
-                                );
-                            })
-                            .ok();
-                        })
-                        .detach();
+                        match new_split_pane {
+                            // Source pane may be the one currently updated, so defer the move.
+                            Ok(Some(new_pane)) => cx
+                                .spawn(|_, mut cx| async move {
+                                    cx.update(|cx| {
+                                        move_item(
+                                            &source,
+                                            &new_pane,
+                                            item_id_to_move,
+                                            new_pane.read(cx).active_item_index(),
+                                            cx,
+                                        );
+                                    })
+                                    .ok();
+                                })
+                                .detach(),
+                            // If we drop into existing pane or current pane,
+                            // regular pane drop handler will take care of it,
+                            // using the right tab index for the operation.
+                            Ok(None) => return ControlFlow::Continue(()),
+                            err @ Err(_) => {
+                                err.log_err();
+                                return ControlFlow::Break(());
+                            }
+                        };
                     } else if let Some(project_path) = item.project_path(cx) {
                         if let Some(entry_path) = project.read(cx).absolute_path(&project_path, cx)
                         {
