@@ -10,7 +10,7 @@ use std::{
     cmp::{self, PartialOrd},
     fmt,
     hash::Hash,
-    ops::{Add, Div, Mul, MulAssign, Sub},
+    ops::{Add, Div, Mul, MulAssign, Neg, Sub},
 };
 
 use crate::{AppContext, DisplayId};
@@ -694,7 +694,7 @@ impl Size<Length> {
 /// Represents a rectangular area in a 2D space with an origin point and a size.
 ///
 /// The `Bounds` struct is generic over a type `T` which represents the type of the coordinate system.
-/// The origin is represented as a `Point<T>` which defines the upper-left corner of the rectangle,
+/// The origin is represented as a `Point<T>` which defines the top left corner of the rectangle,
 /// and the size is represented as a `Size<T>` which defines the width and height of the rectangle.
 ///
 /// # Examples
@@ -755,47 +755,8 @@ impl Bounds<Pixels> {
 
 impl<T> Bounds<T>
 where
-    T: Clone + Debug + Sub<Output = T> + Default,
+    T: Clone + Debug + Default,
 {
-    /// Constructs a `Bounds` from two corner points: the upper-left and lower-right corners.
-    ///
-    /// This function calculates the origin and size of the `Bounds` based on the provided corner points.
-    /// The origin is set to the upper-left corner, and the size is determined by the difference between
-    /// the x and y coordinates of the lower-right and upper-left points.
-    ///
-    /// # Arguments
-    ///
-    /// * `upper_left` - A `Point<T>` representing the upper-left corner of the rectangle.
-    /// * `lower_right` - A `Point<T>` representing the lower-right corner of the rectangle.
-    ///
-    /// # Returns
-    ///
-    /// Returns a `Bounds<T>` that encompasses the area defined by the two corner points.
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// # use gpui::{Bounds, Point};
-    /// let upper_left = Point { x: 0, y: 0 };
-    /// let lower_right = Point { x: 10, y: 10 };
-    /// let bounds = Bounds::from_corners(upper_left, lower_right);
-    ///
-    /// assert_eq!(bounds.origin, upper_left);
-    /// assert_eq!(bounds.size.width, 10);
-    /// assert_eq!(bounds.size.height, 10);
-    /// ```
-    pub fn from_corners(upper_left: Point<T>, lower_right: Point<T>) -> Self {
-        let origin = Point {
-            x: upper_left.x.clone(),
-            y: upper_left.y.clone(),
-        };
-        let size = Size {
-            width: lower_right.x - upper_left.x,
-            height: lower_right.y - upper_left.y,
-        };
-        Bounds { origin, size }
-    }
-
     /// Creates a new `Bounds` with the specified origin and size.
     ///
     /// # Arguments
@@ -813,7 +774,93 @@ where
 
 impl<T> Bounds<T>
 where
-    T: Clone + Debug + PartialOrd + Add<T, Output = T> + Sub<Output = T> + Default + Half,
+    T: Clone + Debug + Sub<Output = T> + Default,
+{
+    /// Constructs a `Bounds` from two corner points: the top left and bottom right corners.
+    ///
+    /// This function calculates the origin and size of the `Bounds` based on the provided corner points.
+    /// The origin is set to the top left corner, and the size is determined by the difference between
+    /// the x and y coordinates of the bottom right and top left points.
+    ///
+    /// # Arguments
+    ///
+    /// * `upper_left` - A `Point<T>` representing the top left corner of the rectangle.
+    /// * `bottom_right` - A `Point<T>` representing the bottom right corner of the rectangle.
+    ///
+    /// # Returns
+    ///
+    /// Returns a `Bounds<T>` that encompasses the area defined by the two corner points.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// # use gpui::{Bounds, Point};
+    /// let upper_left = Point { x: 0, y: 0 };
+    /// let bottom_right = Point { x: 10, y: 10 };
+    /// let bounds = Bounds::from_corners(upper_left, bottom_right);
+    ///
+    /// assert_eq!(bounds.origin, upper_left);
+    /// assert_eq!(bounds.size.width, 10);
+    /// assert_eq!(bounds.size.height, 10);
+    /// ```
+    pub fn from_corners(upper_left: Point<T>, bottom_right: Point<T>) -> Self {
+        let origin = Point {
+            x: upper_left.x.clone(),
+            y: upper_left.y.clone(),
+        };
+        let size = Size {
+            width: bottom_right.x - upper_left.x,
+            height: bottom_right.y - upper_left.y,
+        };
+        Bounds { origin, size }
+    }
+
+    /// Constructs a `Bounds` from a corner point and size.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// # use zed::{Bounds, Corner, Point};
+    /// todo!
+    /// ```
+    pub fn from_corner_and_size(corner: Corner, origin: Point<T>, size: Size<T>) -> Bounds<T> {
+        let origin = match corner {
+            Corner::TopLeft => origin,
+            Corner::TopRight => Point {
+                x: origin.x - size.width.clone(),
+                y: origin.y,
+            },
+            Corner::BottomLeft => Point {
+                x: origin.x,
+                y: origin.y - size.height.clone(),
+            },
+            Corner::BottomRight => Point {
+                x: origin.x - size.width.clone(),
+                y: origin.y - size.height.clone(),
+            },
+        };
+
+        Bounds { origin, size }
+    }
+}
+
+impl<T> Bounds<T>
+where
+    T: Clone + Debug + Sub<T, Output = T> + Default + Half,
+{
+    /// Creates a new bounds centered at the given point.
+    pub fn centered_at(center: Point<T>, size: Size<T>) -> Self {
+        let origin = Point {
+            x: center.x - size.width.half(),
+            y: center.y - size.height.half(),
+        };
+        Self::new(origin, size)
+    }
+}
+
+impl<T> Bounds<T>
+where
+    T: Clone + Debug + PartialOrd + Add<T, Output = T> + Default,
 {
     /// Checks if this `Bounds` intersects with another `Bounds`.
     ///
@@ -849,57 +896,20 @@ where
     /// assert_eq!(bounds1.intersects(&bounds3), false); // Non-overlapping bounds
     /// ```
     pub fn intersects(&self, other: &Bounds<T>) -> bool {
-        let my_lower_right = self.lower_right();
-        let their_lower_right = other.lower_right();
+        let my_lower_right = self.bottom_right();
+        let their_lower_right = other.bottom_right();
 
         self.origin.x < their_lower_right.x
             && my_lower_right.x > other.origin.x
             && self.origin.y < their_lower_right.y
             && my_lower_right.y > other.origin.y
     }
+}
 
-    /// Dilates the bounds by a specified amount in all directions.
-    ///
-    /// This method expands the bounds by the given `amount`, increasing the size
-    /// and adjusting the origin so that the bounds grow outwards equally in all directions.
-    /// The resulting bounds will have its width and height increased by twice the `amount`
-    /// (since it grows in both directions), and the origin will be moved by `-amount`
-    /// in both the x and y directions.
-    ///
-    /// # Arguments
-    ///
-    /// * `amount` - The amount by which to dilate the bounds.
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// # use gpui::{Bounds, Point, Size};
-    /// let mut bounds = Bounds {
-    ///     origin: Point { x: 10, y: 10 },
-    ///     size: Size { width: 10, height: 10 },
-    /// };
-    /// bounds.dilate(5);
-    /// assert_eq!(bounds, Bounds {
-    ///     origin: Point { x: 5, y: 5 },
-    ///     size: Size { width: 20, height: 20 },
-    /// });
-    /// ```
-    pub fn dilate(&mut self, amount: T) {
-        self.origin.x = self.origin.x.clone() - amount.clone();
-        self.origin.y = self.origin.y.clone() - amount.clone();
-        let double_amount = amount.clone() + amount;
-        self.size.width = self.size.width.clone() + double_amount.clone();
-        self.size.height = self.size.height.clone() + double_amount;
-    }
-
-    /// inset the bounds by a specified amount
-    /// Note that this may panic if T does not support negative values
-    pub fn inset(&self, amount: T) -> Self {
-        let mut result = self.clone();
-        result.dilate(T::default() - amount);
-        result
-    }
-
+impl<T> Bounds<T>
+where
+    T: Clone + Debug + Add<T, Output = T> + Default + Half,
+{
     /// Returns the center point of the bounds.
     ///
     /// Calculates the center by taking the origin's x and y coordinates and adding half the width and height
@@ -927,7 +937,12 @@ where
             y: self.origin.y.clone() + self.size.height.clone().half(),
         }
     }
+}
 
+impl<T> Bounds<T>
+where
+    T: Clone + Debug + Add<T, Output = T> + Default,
+{
     /// Calculates the half perimeter of a rectangle defined by the bounds.
     ///
     /// The half perimeter is calculated as the sum of the width and the height of the rectangle.
@@ -949,14 +964,68 @@ where
     pub fn half_perimeter(&self) -> T {
         self.size.width.clone() + self.size.height.clone()
     }
+}
 
-    /// centered_at creates a new bounds centered at the given point.
-    pub fn centered_at(center: Point<T>, size: Size<T>) -> Self {
-        let origin = Point {
-            x: center.x - size.width.half(),
-            y: center.y - size.height.half(),
-        };
-        Self::new(origin, size)
+impl<T> Bounds<T>
+where
+    T: Clone + Debug + Add<T, Output = T> + Sub<Output = T> + Default,
+{
+    /// Dilates the bounds by a specified amount in all directions.
+    ///
+    /// This method expands the bounds by the given `amount`, increasing the size
+    /// and adjusting the origin so that the bounds grow outwards equally in all directions.
+    /// The resulting bounds will have its width and height increased by twice the `amount`
+    /// (since it grows in both directions), and the origin will be moved by `-amount`
+    /// in both the x and y directions.
+    ///
+    /// # Arguments
+    ///
+    /// * `amount` - The amount by which to dilate the bounds.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// # use gpui::{Bounds, Point, Size};
+    /// let mut bounds = Bounds {
+    ///     origin: Point { x: 10, y: 10 },
+    ///     size: Size { width: 10, height: 10 },
+    /// };
+    /// bounds.dilate(5);
+    /// assert_eq!(bounds, Bounds {
+    ///     origin: Point { x: 5, y: 5 },
+    ///     size: Size { width: 20, height: 20 },
+    /// });
+    /// ```
+    pub fn dilate(&self, amount: T) -> Bounds<T> {
+        let double_amount = amount.clone() + amount.clone();
+        Bounds {
+            origin: self.origin.clone() - point(amount.clone(), amount),
+            size: self.size.clone() + size(double_amount.clone(), double_amount),
+        }
+    }
+
+    /// Extends the bounds different amounts in each direction.
+    pub fn extend(&self, amount: Edges<T>) -> Bounds<T> {
+        Bounds {
+            origin: self.origin.clone() - point(amount.left.clone(), amount.top.clone()),
+            size: self.size.clone()
+                + size(
+                    amount.left.clone() + amount.right.clone(),
+                    amount.top.clone() + amount.bottom.clone(),
+                ),
+        }
+    }
+}
+
+impl<T> Bounds<T>
+where
+    T: Clone + Debug + Add<T, Output = T> + Sub<T, Output = T> + Neg<Output = T> + Default,
+{
+    /// Inset the bounds by a specified amount. Equivalent to `dilate` with the amount negated.
+    ///
+    /// Note that this may panic if T does not support negative values.
+    pub fn inset(&self, amount: T) -> Self {
+        self.dilate(-amount)
     }
 }
 
@@ -996,8 +1065,8 @@ impl<T: Clone + Default + Debug + PartialOrd + Add<T, Output = T> + Sub<Output =
     /// ```
     pub fn intersect(&self, other: &Self) -> Self {
         let upper_left = self.origin.max(&other.origin);
-        let lower_right = self.lower_right().min(&other.lower_right());
-        Self::from_corners(upper_left, lower_right)
+        let bottom_right = self.bottom_right().min(&other.bottom_right());
+        Self::from_corners(upper_left, bottom_right)
     }
 
     /// Computes the union of two `Bounds`.
@@ -1035,8 +1104,23 @@ impl<T: Clone + Default + Debug + PartialOrd + Add<T, Output = T> + Sub<Output =
     /// ```
     pub fn union(&self, other: &Self) -> Self {
         let top_left = self.origin.min(&other.origin);
-        let bottom_right = self.lower_right().max(&other.lower_right());
+        let bottom_right = self.bottom_right().max(&other.bottom_right());
         Bounds::from_corners(top_left, bottom_right)
+    }
+}
+
+impl<T> Bounds<T>
+where
+    T: Clone + Debug + Add<T, Output = T> + Sub<T, Output = T> + Default,
+{
+    /// Computes the space available within outer bounds.
+    pub fn space_within(&self, outer: &Self) -> Edges<T> {
+        Edges {
+            top: self.top().clone() - outer.top().clone(),
+            right: outer.right().clone() - self.right().clone(),
+            bottom: outer.bottom().clone() - self.bottom().clone(),
+            left: self.left().clone() - outer.left().clone(),
+        }
     }
 }
 
@@ -1083,6 +1167,34 @@ where
     }
 }
 
+impl<T> Add<Point<T>> for Bounds<T>
+where
+    T: Add<T, Output = T> + Default + Clone + Debug,
+{
+    type Output = Self;
+
+    fn add(self, rhs: Point<T>) -> Self {
+        Self {
+            origin: self.origin + rhs,
+            size: self.size,
+        }
+    }
+}
+
+impl<T> Sub<Point<T>> for Bounds<T>
+where
+    T: Sub<T, Output = T> + Default + Clone + Debug,
+{
+    type Output = Self;
+
+    fn sub(self, rhs: Point<T>) -> Self {
+        Self {
+            origin: self.origin - rhs,
+            size: self.size,
+        }
+    }
+}
+
 impl<T> Bounds<T>
 where
     T: Add<T, Output = T> + Clone + Default + Debug,
@@ -1123,11 +1235,11 @@ where
         self.origin.x.clone() + self.size.width.clone()
     }
 
-    /// Returns the upper-right corner point of the bounds.
+    /// Returns the top right corner point of the bounds.
     ///
     /// # Returns
     ///
-    /// A `Point<T>` representing the upper-right corner of the bounds.
+    /// A `Point<T>` representing the top right corner of the bounds.
     ///
     /// # Examples
     ///
@@ -1137,21 +1249,21 @@ where
     ///     origin: Point { x: 0, y: 0 },
     ///     size: Size { width: 10, height: 20 },
     /// };
-    /// let upper_right = bounds.upper_right();
-    /// assert_eq!(upper_right, Point { x: 10, y: 0 });
+    /// let top_right = bounds.top_right();
+    /// assert_eq!(top_right, Point { x: 10, y: 0 });
     /// ```
-    pub fn upper_right(&self) -> Point<T> {
+    pub fn top_right(&self) -> Point<T> {
         Point {
             x: self.origin.x.clone() + self.size.width.clone(),
             y: self.origin.y.clone(),
         }
     }
 
-    /// Returns the lower-right corner point of the bounds.
+    /// Returns the bottom right corner point of the bounds.
     ///
     /// # Returns
     ///
-    /// A `Point<T>` representing the lower-right corner of the bounds.
+    /// A `Point<T>` representing the bottom right corner of the bounds.
     ///
     /// # Examples
     ///
@@ -1161,21 +1273,21 @@ where
     ///     origin: Point { x: 0, y: 0 },
     ///     size: Size { width: 10, height: 20 },
     /// };
-    /// let lower_right = bounds.lower_right();
-    /// assert_eq!(lower_right, Point { x: 10, y: 20 });
+    /// let bottom_right = bounds.bottom_right();
+    /// assert_eq!(bottom_right, Point { x: 10, y: 20 });
     /// ```
-    pub fn lower_right(&self) -> Point<T> {
+    pub fn bottom_right(&self) -> Point<T> {
         Point {
             x: self.origin.x.clone() + self.size.width.clone(),
             y: self.origin.y.clone() + self.size.height.clone(),
         }
     }
 
-    /// Returns the lower-left corner point of the bounds.
+    /// Returns the bottom left corner point of the bounds.
     ///
     /// # Returns
     ///
-    /// A `Point<T>` representing the lower-left corner of the bounds.
+    /// A `Point<T>` representing the bottom left corner of the bounds.
     ///
     /// # Examples
     ///
@@ -1185,13 +1297,39 @@ where
     ///     origin: Point { x: 0, y: 0 },
     ///     size: Size { width: 10, height: 20 },
     /// };
-    /// let lower_left = bounds.lower_left();
-    /// assert_eq!(lower_left, Point { x: 0, y: 20 });
+    /// let bottom_left = bounds.bottom_left();
+    /// assert_eq!(bottom_left, Point { x: 0, y: 20 });
     /// ```
-    pub fn lower_left(&self) -> Point<T> {
+    pub fn bottom_left(&self) -> Point<T> {
         Point {
             x: self.origin.x.clone(),
             y: self.origin.y.clone() + self.size.height.clone(),
+        }
+    }
+
+    /// Returns the requested corner point of the bounds.
+    ///
+    /// # Returns
+    ///
+    /// A `Point<T>` representing the corner of the bounds requested by the parameter.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// # use zed::{Bounds, Corner, Point, Size};
+    /// let bounds = Bounds {
+    ///     origin: Point { x: 0, y: 0 },
+    ///     size: Size { width: 10, height: 20 },
+    /// };
+    /// let bottom_left = bounds.corner(Corner::BottomLeft);
+    /// assert_eq!(bottom_left, Point { x: 0, y: 20 });
+    /// ```
+    pub fn corner(&self, corner: Corner) -> Point<T> {
+        match corner {
+            Corner::TopLeft => self.origin.clone(),
+            Corner::TopRight => self.top_right(),
+            Corner::BottomLeft => self.bottom_left(),
+            Corner::BottomRight => self.bottom_right(),
         }
     }
 }
@@ -1861,6 +1999,64 @@ impl From<Pixels> for Edges<Pixels> {
     }
 }
 
+/// Identifies a corner of a 2d box.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum Corner {
+    /// The top left corner
+    TopLeft,
+    /// The top right corner
+    TopRight,
+    /// The bottom left corner
+    BottomLeft,
+    /// The bottom right corner
+    BottomRight,
+}
+
+impl Corner {
+    /// Returns the directly opposite corner.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// # use zed::Corner;
+    /// assert_eq!(Corner::TopLeft.opposite_corner(), Corner::BottomRight);
+    /// ```
+    pub fn opposite_corner(self) -> Self {
+        match self {
+            Corner::TopLeft => Corner::BottomRight,
+            Corner::TopRight => Corner::BottomLeft,
+            Corner::BottomLeft => Corner::TopRight,
+            Corner::BottomRight => Corner::TopLeft,
+        }
+    }
+
+    /// Returns the corner across from this corner, moving along the specified axis.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// # use zed::Corner;
+    /// let result = Corner::TopLeft.other_side_corner_along(Axis::Horizontal);
+    /// assert_eq!(result, Corner::TopRight);
+    /// ```
+    pub fn other_side_corner_along(self, axis: Axis) -> Self {
+        match axis {
+            Axis::Vertical => match self {
+                Corner::TopLeft => Corner::BottomLeft,
+                Corner::TopRight => Corner::BottomRight,
+                Corner::BottomLeft => Corner::TopLeft,
+                Corner::BottomRight => Corner::TopRight,
+            },
+            Axis::Horizontal => match self {
+                Corner::TopLeft => Corner::TopRight,
+                Corner::TopRight => Corner::TopLeft,
+                Corner::BottomLeft => Corner::BottomRight,
+                Corner::BottomRight => Corner::BottomLeft,
+            },
+        }
+    }
+}
+
 /// Represents the corners of a box in a 2D space, such as border radius.
 ///
 /// Each field represents the size of the corner on one side of the box: `top_left`, `top_right`, `bottom_right`, and `bottom_left`.
@@ -1912,6 +2108,33 @@ where
             top_right: value.clone(),
             bottom_right: value.clone(),
             bottom_left: value,
+        }
+    }
+
+    /// Returns the requested corner.
+    ///
+    /// # Returns
+    ///
+    /// A `Point<T>` representing the corner requested by the parameter.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// # use zed::{Corner, Corners};
+    /// let corners = Corners {
+    ///     top_left: 1,
+    ///     top_right: 2,
+    ///     bottom_left: 3,
+    ///     bottom_right: 4
+    /// };
+    /// assert_eq!(corners.corner(Corner::BottomLeft), 3);
+    /// ```
+    pub fn corner(&self, corner: Corner) -> T {
+        match corner {
+            Corner::TopLeft => self.top_left.clone(),
+            Corner::TopRight => self.top_right.clone(),
+            Corner::BottomLeft => self.bottom_left.clone(),
+            Corner::BottomRight => self.bottom_right.clone(),
         }
     }
 }

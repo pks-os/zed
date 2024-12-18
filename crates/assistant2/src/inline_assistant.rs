@@ -1,15 +1,16 @@
 use crate::context::attach_context_to_message;
+use crate::context_picker::ContextPicker;
 use crate::context_store::ContextStore;
 use crate::context_strip::ContextStrip;
 use crate::thread_store::ThreadStore;
-use crate::AssistantPanel;
 use crate::{
     assistant_settings::AssistantSettings,
     prompts::PromptBuilder,
     streaming_diff::{CharOperation, LineDiff, LineOperation, StreamingDiff},
     terminal_inline_assistant::TerminalInlineAssistant,
-    CycleNextInlineAssist, CyclePreviousInlineAssist, ToggleInlineAssist,
+    CycleNextInlineAssist, CyclePreviousInlineAssist,
 };
+use crate::{AssistantPanel, ToggleContextPicker};
 use anyhow::{Context as _, Result};
 use client::{telemetry::Telemetry, ErrorExt};
 use collections::{hash_map, HashMap, HashSet, VecDeque};
@@ -60,7 +61,9 @@ use telemetry_events::{AssistantEvent, AssistantKind, AssistantPhase};
 use terminal_view::{terminal_panel::TerminalPanel, TerminalView};
 use text::{OffsetRangeExt, ToPoint as _};
 use theme::ThemeSettings;
-use ui::{prelude::*, CheckboxWithLabel, IconButtonShape, KeyBinding, Popover, Tooltip};
+use ui::{
+    prelude::*, CheckboxWithLabel, IconButtonShape, KeyBinding, Popover, PopoverMenuHandle, Tooltip,
+};
 use util::{RangeExt, ResultExt};
 use workspace::{dock::Panel, ShowConfiguration};
 use workspace::{notifications::NotificationId, ItemHandle, Toast, Workspace};
@@ -72,9 +75,7 @@ pub fn init(
     cx: &mut AppContext,
 ) {
     cx.set_global(InlineAssistant::new(fs, prompt_builder, telemetry));
-    cx.observe_new_views(|workspace: &mut Workspace, cx| {
-        workspace.register_action(InlineAssistant::toggle_inline_assist);
-
+    cx.observe_new_views(|_workspace: &mut Workspace, cx| {
         let workspace = cx.view().clone();
         InlineAssistant::update_global(cx, |inline_assistant, cx| {
             inline_assistant.register_workspace(&workspace, cx)
@@ -201,9 +202,9 @@ impl InlineAssistant {
         }
     }
 
-    pub fn toggle_inline_assist(
+    pub fn inline_assist(
         workspace: &mut Workspace,
-        _action: &ToggleInlineAssist,
+        _action: &zed_actions::InlineAssist,
         cx: &mut ViewContext<Workspace>,
     ) {
         let settings = AssistantSettings::get_global(cx);
@@ -1486,6 +1487,7 @@ struct PromptEditor {
     id: InlineAssistId,
     editor: View<Editor>,
     context_strip: View<ContextStrip>,
+    context_picker_menu_handle: PopoverMenuHandle<ContextPicker>,
     language_model_selector: View<LanguageModelSelector>,
     edited_since_done: bool,
     gutter_dimensions: Arc<Mutex<GutterDimensions>>,
@@ -1607,6 +1609,7 @@ impl Render for PromptEditor {
                     .bg(cx.theme().colors().editor_background)
                     .block_mouse_down()
                     .cursor(CursorStyle::Arrow)
+                    .on_action(cx.listener(Self::toggle_context_picker))
                     .on_action(cx.listener(Self::confirm))
                     .on_action(cx.listener(Self::cancel))
                     .on_action(cx.listener(Self::move_up))
@@ -1670,7 +1673,7 @@ impl Render for PromptEditor {
                                                             gpui::AnchoredPositionMode::Local,
                                                         )
                                                         .position(point(px(0.), px(24.)))
-                                                        .anchor(gpui::AnchorCorner::TopLeft)
+                                                        .anchor(gpui::Corner::TopLeft)
                                                         .child(self.render_rate_limit_notice(cx)),
                                                 )
                                             })),
@@ -1747,13 +1750,22 @@ impl PromptEditor {
             editor.set_placeholder_text(Self::placeholder_text(codegen.read(cx)), cx);
             editor
         });
+        let context_picker_menu_handle = PopoverMenuHandle::default();
 
         let mut this = Self {
             id,
-            editor: prompt_editor,
+            editor: prompt_editor.clone(),
             context_strip: cx.new_view(|cx| {
-                ContextStrip::new(context_store, workspace.clone(), thread_store.clone(), cx)
+                ContextStrip::new(
+                    context_store,
+                    workspace.clone(),
+                    thread_store.clone(),
+                    prompt_editor.focus_handle(cx),
+                    context_picker_menu_handle.clone(),
+                    cx,
+                )
             }),
+            context_picker_menu_handle,
             language_model_selector: cx.new_view(|cx| {
                 let fs = fs.clone();
                 LanguageModelSelector::new(
@@ -1909,6 +1921,10 @@ impl PromptEditor {
                     .update(cx, |editor, _| editor.set_read_only(false));
             }
         }
+    }
+
+    fn toggle_context_picker(&mut self, _: &ToggleContextPicker, cx: &mut ViewContext<Self>) {
+        self.context_picker_menu_handle.toggle(cx);
     }
 
     fn cancel(&mut self, _: &editor::actions::Cancel, cx: &mut ViewContext<Self>) {
