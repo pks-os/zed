@@ -128,6 +128,7 @@ use multi_buffer::{
     ExpandExcerptDirection, MultiBufferDiffHunk, MultiBufferPoint, MultiBufferRow, ToOffsetUtf16,
 };
 use project::{
+    buffer_store::BufferChangeSet,
     lsp_store::{FormatTarget, FormatTrigger, OpenLspBufferHandle},
     project_settings::{GitGutterSetting, ProjectSettings},
     CodeAction, Completion, CompletionIntent, DocumentHighlight, InlayHint, Location, LocationLink,
@@ -605,6 +606,7 @@ pub struct Editor {
     mode: EditorMode,
     show_breadcrumbs: bool,
     show_gutter: bool,
+    show_scrollbars: bool,
     show_line_numbers: Option<bool>,
     use_relative_line_numbers: Option<bool>,
     show_git_diff_gutter: Option<bool>,
@@ -1234,6 +1236,7 @@ impl Editor {
             project,
             blink_manager: blink_manager.clone(),
             show_local_selections: true,
+            show_scrollbars: true,
             mode,
             show_breadcrumbs: EditorSettings::get_global(cx).toolbar.breadcrumbs,
             show_gutter: mode == EditorMode::Full,
@@ -5130,14 +5133,14 @@ impl Editor {
     fn render_context_menu_aside(
         &self,
         style: &EditorStyle,
-        max_height: Pixels,
+        max_size: Size<Pixels>,
         cx: &mut ViewContext<Editor>,
     ) -> Option<AnyElement> {
         self.context_menu.borrow().as_ref().and_then(|menu| {
             if menu.visible() {
                 menu.render_aside(
                     style,
-                    max_height,
+                    max_size,
                     self.workspace.as_ref().map(|(w, _)| w.clone()),
                     cx,
                 )
@@ -11259,6 +11262,11 @@ impl Editor {
         cx.notify();
     }
 
+    pub fn set_show_scrollbars(&mut self, show_scrollbars: bool, cx: &mut ViewContext<Self>) {
+        self.show_scrollbars = show_scrollbars;
+        cx.notify();
+    }
+
     pub fn set_show_line_numbers(&mut self, show_line_numbers: bool, cx: &mut ViewContext<Self>) {
         self.show_line_numbers = Some(show_line_numbers);
         cx.notify();
@@ -12948,6 +12956,14 @@ impl Editor {
         self.addons
             .get(&type_id)
             .and_then(|item| item.to_any().downcast_ref::<T>())
+    }
+
+    pub fn add_change_set(
+        &mut self,
+        change_set: Model<BufferChangeSet>,
+        cx: &mut ViewContext<Self>,
+    ) {
+        self.diff_map.add_change_set(change_set, cx);
     }
 
     fn character_size(&self, cx: &mut ViewContext<Self>) -> gpui::Point<Pixels> {
