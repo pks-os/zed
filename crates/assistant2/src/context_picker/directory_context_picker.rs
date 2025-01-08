@@ -188,7 +188,7 @@ impl PickerDelegate for DirectoryContextPickerDelegate {
         };
         let path = mat.path.clone();
 
-        if self
+        let already_included = self
             .context_store
             .update(cx, |context_store, _cx| {
                 if let Some(context_id) = context_store.included_directory(&path) {
@@ -198,8 +198,8 @@ impl PickerDelegate for DirectoryContextPickerDelegate {
                     false
                 }
             })
-            .unwrap_or(true)
-        {
+            .unwrap_or(true);
+        if already_included {
             return;
         }
 
@@ -304,7 +304,16 @@ impl PickerDelegate for DirectoryContextPickerDelegate {
                 .toggle_state(selected)
                 .child(h_flex().gap_2().child(Label::new(directory_name)))
                 .when(added, |el| {
-                    el.end_slot(Label::new("Added").size(LabelSize::XSmall))
+                    el.end_slot(
+                        h_flex()
+                            .gap_1()
+                            .child(
+                                Icon::new(IconName::Check)
+                                    .size(IconSize::Small)
+                                    .color(Color::Success),
+                            )
+                            .child(Label::new("Added").size(LabelSize::Small)),
+                    )
                 }),
         )
     }

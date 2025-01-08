@@ -202,7 +202,7 @@ impl PickerDelegate for FileContextPickerDelegate {
         };
         let path = mat.path.clone();
 
-        if self
+        let already_included = self
             .context_store
             .update(cx, |context_store, _cx| {
                 match context_store.included_file(&path) {
@@ -214,8 +214,8 @@ impl PickerDelegate for FileContextPickerDelegate {
                     None => false,
                 }
             })
-            .unwrap_or(true)
-        {
+            .unwrap_or(true);
+        if already_included {
             return;
         }
 
@@ -322,14 +322,30 @@ impl PickerDelegate for FileContextPickerDelegate {
                         })),
                 )
                 .when_some(added, |el, added| match added {
-                    IncludedFile::Direct(_) => {
-                        el.end_slot(Label::new("Added").size(LabelSize::XSmall))
-                    }
+                    IncludedFile::Direct(_) => el.end_slot(
+                        h_flex()
+                            .gap_1()
+                            .child(
+                                Icon::new(IconName::Check)
+                                    .size(IconSize::Small)
+                                    .color(Color::Success),
+                            )
+                            .child(Label::new("Added").size(LabelSize::Small)),
+                    ),
                     IncludedFile::InDirectory(dir_name) => {
                         let dir_name = dir_name.to_string_lossy().into_owned();
 
-                        el.end_slot(Label::new("Included").size(LabelSize::XSmall))
-                            .tooltip(move |cx| Tooltip::text(format!("in {dir_name}"), cx))
+                        el.end_slot(
+                            h_flex()
+                                .gap_1()
+                                .child(
+                                    Icon::new(IconName::Check)
+                                        .size(IconSize::Small)
+                                        .color(Color::Success),
+                                )
+                                .child(Label::new("Included").size(LabelSize::Small)),
+                        )
+                        .tooltip(move |cx| Tooltip::text(format!("in {dir_name}"), cx))
                     }
                 }),
         )

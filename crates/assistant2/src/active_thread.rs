@@ -137,7 +137,7 @@ impl ActiveThread {
             inline_code: TextStyleRefinement {
                 font_family: Some(theme_settings.buffer_font.family.clone()),
                 font_size: Some(buffer_font_size.into()),
-                background_color: Some(colors.editor_foreground.opacity(0.01)),
+                background_color: Some(colors.editor_foreground.opacity(0.1)),
                 ..Default::default()
             },
             link: TextStyleRefinement {
@@ -282,13 +282,11 @@ impl ActiveThread {
                     .child(div().p_2p5().text_ui(cx).child(markdown.clone()))
                     .when_some(context, |parent, context| {
                         if !context.is_empty() {
-                            parent.child(
-                                h_flex().flex_wrap().gap_1().px_1p5().pb_1p5().children(
-                                    context
-                                        .iter()
-                                        .map(|context| ContextPill::new(context.clone())),
-                                ),
-                            )
+                            parent.child(h_flex().flex_wrap().gap_1().px_1p5().pb_1p5().children(
+                                context.iter().map(|context| {
+                                    ContextPill::new_added(context.clone(), false, None)
+                                }),
+                            ))
                         } else {
                             parent
                         }

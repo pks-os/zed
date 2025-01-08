@@ -5178,8 +5178,10 @@ dependencies = [
  "anyhow",
  "collections",
  "db",
+ "editor",
  "git",
  "gpui",
+ "language",
  "menu",
  "project",
  "schemars",
@@ -5187,6 +5189,7 @@ dependencies = [
  "serde_derive",
  "serde_json",
  "settings",
+ "theme",
  "ui",
  "util",
  "windows 0.58.0",
@@ -8408,8 +8411,7 @@ checksum = "1261fe7e33c73b354eab43b1273a57c8f967d0391e80353e51f764ac02cf6775"
 [[package]]
 name = "oo7"
 version = "0.3.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8fc6ce4692fbfd044ce22ca07dcab1a30fa12432ca2aa5b1294eca50d3332a24"
+source = "git+https://github.com/zed-industries/oo7?branch=avoid-crypto-panic#9d5d5fcd7e4e0add9b420ffb58f67661b0b37568"
 dependencies = [
  "aes",
  "async-fs 2.1.2",
@@ -10340,7 +10342,6 @@ dependencies = [
  "futures 0.3.31",
  "fuzzy",
  "gpui",
- "itertools 0.13.0",
  "language",
  "log",
  "markdown",
@@ -13813,9 +13814,9 @@ dependencies = [
 
 [[package]]
 name = "tree-sitter-python"
-version = "0.23.5"
+version = "0.23.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "70beaa47e19e1529e8787fc0a80ebbae5a9fdaefc5fcc8972c885c9abf6ab0f0"
+checksum = "3d065aaa27f3aaceaf60c1f0e0ac09e1cb9eb8ed28e7bcdaa52129cffc7f4b04"
 dependencies = [
  "cc",
  "tree-sitter-language",

@@ -1,7 +1,7 @@
 use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 
-use collections::HashMap;
+use collections::{HashMap, HashSet};
 use gpui::SharedString;
 use language::Buffer;
 
@@ -36,12 +36,6 @@ impl ContextStore {
         &self.context
     }
 
-    pub fn drain(&mut self) -> Vec<Context> {
-        let context = self.context.drain(..).collect();
-        self.clear();
-        context
-    }
-
     pub fn clear(&mut self) {
         self.context.clear();
         self.files.clear();
@@ -60,7 +54,17 @@ impl ContextStore {
         let id = self.next_context_id.post_inc();
         self.files.insert(path.to_path_buf(), id);
 
-        let name = path.to_string_lossy().into_owned().into();
+        let full_path: SharedString = path.to_string_lossy().into_owned().into();
+
+        let name = match path.file_name() {
+            Some(name) => name.to_string_lossy().into_owned().into(),
+            None => full_path.clone(),
+        };
+
+        let parent = path
+            .parent()
+            .and_then(|p| p.file_name())
+            .map(|p| p.to_string_lossy().into_owned().into());
 
         let mut text = String::new();
         push_fenced_codeblock(path, buffer.text(), &mut text);
@@ -68,6 +72,8 @@ impl ContextStore {
         self.context.push(Context {
             id,
             name,
+            parent,
+            tooltip: Some(full_path),
             kind: ContextKind::File,
             text: text.into(),
         });
@@ -77,11 +83,23 @@ impl ContextStore {
         let id = self.next_context_id.post_inc();
         self.directories.insert(path.to_path_buf(), id);
 
-        let name = path.to_string_lossy().into_owned().into();
+        let full_path: SharedString = path.to_string_lossy().into_owned().into();
+
+        let name = match path.file_name() {
+            Some(name) => name.to_string_lossy().into_owned().into(),
+            None => full_path.clone(),
+        };
+
+        let parent = path
+            .parent()
+            .and_then(|p| p.file_name())
+            .map(|p| p.to_string_lossy().into_owned().into());
 
         self.context.push(Context {
             id,
             name,
+            parent,
+            tooltip: Some(full_path),
             kind: ContextKind::Directory,
             text: text.into(),
         });
@@ -94,6 +112,8 @@ impl ContextStore {
         self.context.push(Context {
             id: context_id,
             name: thread.summary().unwrap_or("New thread".into()),
+            parent: None,
+            tooltip: None,
             kind: ContextKind::Thread,
             text: thread.text().into(),
         });
@@ -106,6 +126,8 @@ impl ContextStore {
         self.context.push(Context {
             id: context_id,
             name: url.into(),
+            parent: None,
+            tooltip: None,
             kind: ContextKind::FetchedUrl,
             text: text.into(),
         });
@@ -162,6 +184,19 @@ impl ContextStore {
 
     pub fn included_url(&self, url: &str) -> Option<ContextId> {
         self.fetched_urls.get(url).copied()
+    }
+
+    pub fn duplicated_names(&self) -> HashSet<SharedString> {
+        let mut seen = HashSet::default();
+        let mut dupes = HashSet::default();
+
+        for context in self.context().iter() {
+            if !seen.insert(&context.name) {
+                dupes.insert(context.name.clone());
+            }
+        }
+
+        dupes
     }
 }
 
