@@ -4511,7 +4511,8 @@ impl Editor {
         if !user_requested
             && (!self.enable_inline_completions
                 || !self.should_show_inline_completions(&buffer, cursor_buffer_position, cx)
-                || !self.is_focused(cx))
+                || !self.is_focused(cx)
+                || buffer.read(cx).is_empty())
         {
             self.discard_inline_completion(false, cx);
             return None;
@@ -4732,9 +4733,7 @@ impl Editor {
         let Some(provider) = self.inline_completion_provider() else {
             return;
         };
-        let Some(project) = self.project.as_ref() else {
-            return;
-        };
+
         let Some((_, buffer, _)) = self
             .buffer
             .read(cx)
@@ -4743,15 +4742,20 @@ impl Editor {
             return;
         };
 
-        let project = project.read(cx);
         let extension = buffer
             .read(cx)
             .file()
             .and_then(|file| Some(file.path().extension()?.to_string_lossy().to_string()));
-        project.client().telemetry().report_inline_completion_event(
-            provider.name().into(),
-            accepted,
-            extension,
+
+        let event_type = match accepted {
+            true => "Inline Completion Accepted",
+            false => "Inline Completion Discarded",
+        };
+        telemetry::event!(
+            event_type,
+            provider = provider.name(),
+            suggestion_accepted = accepted,
+            file_extension = extension,
         );
     }
 
