@@ -100,8 +100,8 @@ use itertools::Itertools;
 use language::{
     language_settings::{self, all_language_settings, language_settings, InlayHintSettings},
     markdown, point_from_lsp, AutoindentMode, BracketPair, Buffer, Capability, CharKind, CodeLabel,
-    CursorShape, Diagnostic, Documentation, IndentKind, IndentSize, Language, OffsetRangeExt,
-    Point, Selection, SelectionGoal, TransactionId,
+    CursorShape, Diagnostic, Documentation, EditPreview, HighlightedEdits, IndentKind, IndentSize,
+    Language, OffsetRangeExt, Point, Selection, SelectionGoal, TransactionId,
 };
 use language::{point_to_lsp, BufferRow, CharClassifier, Runnable, RunnableRange};
 use linked_editing_ranges::refresh_linked_ranges;
@@ -120,6 +120,7 @@ use lsp::{
     LanguageServerId, LanguageServerName,
 };
 
+use language::BufferSnapshot;
 use movement::TextLayoutDetails;
 pub use multi_buffer::{
     Anchor, AnchorRangeExt, ExcerptId, ExcerptRange, MultiBuffer, MultiBufferSnapshot, ToOffset,
@@ -479,10 +480,7 @@ impl InlineCompletionMenuHint {
 #[derive(Clone, Debug)]
 enum InlineCompletionText {
     Move(SharedString),
-    Edit {
-        text: SharedString,
-        highlights: Vec<(Range<usize>, HighlightStyle)>,
-    },
+    Edit(HighlightedEdits),
 }
 
 pub(crate) enum EditDisplayMode {
@@ -494,7 +492,9 @@ pub(crate) enum EditDisplayMode {
 enum InlineCompletion {
     Edit {
         edits: Vec<(Range<Anchor>, String)>,
+        edit_preview: Option<EditPreview>,
         display_mode: EditDisplayMode,
+        snapshot: BufferSnapshot,
     },
     Move(Anchor),
 }
@@ -506,6 +506,11 @@ struct InlineCompletionState {
 }
 
 enum InlineCompletionHighlight {}
+
+pub enum MenuInlineCompletionsPolicy {
+    Never,
+    ByProvider,
+}
 
 #[derive(Copy, Clone, Eq, PartialEq, PartialOrd, Ord, Debug, Default)]
 struct EditorActionId(usize);
@@ -678,6 +683,7 @@ pub struct Editor {
     // inline completions based on its mode.
     enable_inline_completions: bool,
     show_inline_completions_override: Option<bool>,
+    menu_inline_completions_policy: MenuInlineCompletionsPolicy,
     inlay_hint_cache: InlayHintCache,
     diff_map: DiffMap,
     next_inlay_id: usize,
@@ -1336,6 +1342,7 @@ impl Editor {
             editor_actions: Rc::default(),
             show_inline_completions_override: None,
             enable_inline_completions: true,
+            menu_inline_completions_policy: MenuInlineCompletionsPolicy::ByProvider,
             custom_context_menu: None,
             show_git_blame_gutter: false,
             show_git_blame_inline: false,
@@ -1572,7 +1579,7 @@ impl Editor {
         self.buffer().read(cx).title(cx)
     }
 
-    pub fn snapshot(&mut self, cx: &mut WindowContext) -> EditorSnapshot {
+    pub fn snapshot(&self, cx: &mut WindowContext) -> EditorSnapshot {
         let git_blame_gutter_max_author_length = self
             .render_git_blame_gutter(cx)
             .then(|| {
@@ -1755,6 +1762,10 @@ impl Editor {
             self.take_active_inline_completion(cx);
             cx.notify();
         }
+    }
+
+    pub fn set_menu_inline_completions_policy(&mut self, value: MenuInlineCompletionsPolicy) {
+        self.menu_inline_completions_policy = value;
     }
 
     pub fn set_autoindent(&mut self, autoindent: bool) {
@@ -4695,10 +4706,7 @@ impl Editor {
                     selections.select_anchor_ranges([position..position]);
                 });
             }
-            InlineCompletion::Edit {
-                edits,
-                display_mode: _,
-            } => {
+            InlineCompletion::Edit { edits, .. } => {
                 if let Some(provider) = self.inline_completion_provider() {
                     provider.accept(cx);
                 }
@@ -4745,10 +4753,7 @@ impl Editor {
                     selections.select_anchor_ranges([position..position]);
                 });
             }
-            InlineCompletion::Edit {
-                edits,
-                display_mode: _,
-            } => {
+            InlineCompletion::Edit { edits, .. } => {
                 // Find an insertion that starts at the cursor position.
                 let snapshot = self.buffer.read(cx).snapshot(cx);
                 let cursor_offset = self.selections.newest::<usize>(cx).head();
@@ -4883,8 +4888,8 @@ impl Editor {
         let (buffer, cursor_buffer_position) =
             self.buffer.read(cx).text_anchor_for_position(cursor, cx)?;
 
-        let completion = provider.suggest(&buffer, cursor_buffer_position, cx)?;
-        let edits = completion
+        let inline_completion = provider.suggest(&buffer, cursor_buffer_position, cx)?;
+        let edits = inline_completion
             .edits
             .into_iter()
             .flat_map(|(range, new_text)| {
@@ -4909,13 +4914,12 @@ impl Editor {
 
         let mut inlay_ids = Vec::new();
         let invalidation_row_range;
-        let completion;
-        if cursor_row < edit_start_row {
+        let completion = if cursor_row < edit_start_row {
             invalidation_row_range = cursor_row..edit_end_row;
-            completion = InlineCompletion::Move(first_edit_start);
+            InlineCompletion::Move(first_edit_start)
         } else if cursor_row > edit_end_row {
             invalidation_row_range = edit_start_row..cursor_row;
-            completion = InlineCompletion::Move(first_edit_start);
+            InlineCompletion::Move(first_edit_start)
         } else {
             if edits
                 .iter()
@@ -4960,10 +4964,14 @@ impl Editor {
                 EditDisplayMode::DiffPopover
             };
 
-            completion = InlineCompletion::Edit {
+            let snapshot = multibuffer.buffer_for_excerpt(excerpt_id).cloned()?;
+
+            InlineCompletion::Edit {
                 edits,
+                edit_preview: inline_completion.edit_preview,
                 display_mode,
-            };
+                snapshot,
+            }
         };
 
         let invalidation_range = multibuffer
@@ -4996,7 +5004,7 @@ impl Editor {
     }
 
     fn inline_completion_menu_hint(
-        &mut self,
+        &self,
         cx: &mut ViewContext<Self>,
     ) -> Option<InlineCompletionMenuHint> {
         let provider = self.inline_completion_provider()?;
@@ -5006,19 +5014,26 @@ impl Editor {
             let text = match &self.active_inline_completion.as_ref()?.completion {
                 InlineCompletion::Edit {
                     edits,
+                    edit_preview,
                     display_mode: _,
-                } => inline_completion_edit_text(&editor_snapshot, edits, true, cx),
+                    snapshot,
+                } => edit_preview
+                    .as_ref()
+                    .and_then(|edit_preview| {
+                        inline_completion_edit_text(&snapshot, &edits, edit_preview, true, cx)
+                    })
+                    .map(InlineCompletionText::Edit),
                 InlineCompletion::Move(target) => {
                     let target_point =
                         target.to_point(&editor_snapshot.display_snapshot.buffer_snapshot);
                     let target_line = target_point.row + 1;
-                    InlineCompletionText::Move(
+                    Some(InlineCompletionText::Move(
                         format!("Jump to edit in line {}", target_line).into(),
-                    )
+                    ))
                 }
             };
 
-            Some(InlineCompletionMenuHint::Loaded { text })
+            Some(InlineCompletionMenuHint::Loaded { text: text? })
         } else if provider.is_refreshing(cx) {
             Some(InlineCompletionMenuHint::Loading)
         } else if provider.needs_terms_acceptance(cx) {
@@ -5033,7 +5048,13 @@ impl Editor {
     }
 
     fn show_inline_completions_in_menu(&self, cx: &AppContext) -> bool {
-        EditorSettings::get_global(cx).show_inline_completions_in_menu
+        let by_provider = matches!(
+            self.menu_inline_completions_policy,
+            MenuInlineCompletionsPolicy::ByProvider
+        );
+
+        by_provider
+            && EditorSettings::get_global(cx).show_inline_completions_in_menu
             && self
                 .inline_completion_provider()
                 .map_or(false, |provider| provider.show_completions_in_menu())
@@ -6164,7 +6185,7 @@ impl Editor {
     }
 
     fn gather_revert_changes(
-        &mut self,
+        &self,
         selections: &[Selection<Point>],
         cx: &mut ViewContext<Editor>,
     ) -> HashMap<BufferId, Vec<(Range<text::Anchor>, Rope)>> {
@@ -6177,7 +6198,7 @@ impl Editor {
     }
 
     pub fn prepare_revert_change(
-        &mut self,
+        &self,
         revert_changes: &mut HashMap<BufferId, Vec<(Range<text::Anchor>, Rope)>>,
         hunk: &MultiBufferDiffHunk,
         cx: &AppContext,
@@ -10675,6 +10696,7 @@ impl Editor {
                 }
             });
         });
+        self.request_autoscroll(Autoscroll::newest(), cx);
         cx.notify();
     }
 
@@ -11699,23 +11721,23 @@ impl Editor {
         self.show_git_blame_gutter
     }
 
-    pub fn render_git_blame_gutter(&mut self, cx: &mut WindowContext) -> bool {
+    pub fn render_git_blame_gutter(&self, cx: &WindowContext) -> bool {
         self.show_git_blame_gutter && self.has_blame_entries(cx)
     }
 
-    pub fn render_git_blame_inline(&mut self, cx: &mut WindowContext) -> bool {
+    pub fn render_git_blame_inline(&self, cx: &WindowContext) -> bool {
         self.show_git_blame_inline
             && self.focus_handle.is_focused(cx)
             && !self.newest_selection_head_on_empty_line(cx)
             && self.has_blame_entries(cx)
     }
 
-    fn has_blame_entries(&self, cx: &mut WindowContext) -> bool {
+    fn has_blame_entries(&self, cx: &WindowContext) -> bool {
         self.blame()
             .map_or(false, |blame| blame.read(cx).has_generated_entries())
     }
 
-    fn newest_selection_head_on_empty_line(&mut self, cx: &mut WindowContext) -> bool {
+    fn newest_selection_head_on_empty_line(&self, cx: &WindowContext) -> bool {
         let cursor_anchor = self.selections.newest_anchor().head();
 
         let snapshot = self.buffer.read(cx).snapshot(cx);
@@ -11724,7 +11746,7 @@ impl Editor {
         snapshot.line_len(buffer_row) == 0
     }
 
-    fn get_permalink_to_line(&mut self, cx: &mut ViewContext<Self>) -> Task<Result<url::Url>> {
+    fn get_permalink_to_line(&self, cx: &mut ViewContext<Self>) -> Task<Result<url::Url>> {
         let buffer_and_selection = maybe!({
             let selection = self.selections.newest::<Point>(cx);
             let selection_range = selection.range();
@@ -12008,10 +12030,7 @@ impl Editor {
     /// Merges all anchor ranges for all context types ever set, picking the last highlight added in case of a row conflict.
     /// Returns a map of display rows that are highlighted and their corresponding highlight color.
     /// Allows to ignore certain kinds of highlights.
-    pub fn highlighted_display_rows(
-        &mut self,
-        cx: &mut WindowContext,
-    ) -> BTreeMap<DisplayRow, Hsla> {
+    pub fn highlighted_display_rows(&self, cx: &mut WindowContext) -> BTreeMap<DisplayRow, Hsla> {
         let snapshot = self.snapshot(cx);
         let mut used_highlight_orders = HashMap::default();
         self.highlighted_rows
@@ -12125,7 +12144,7 @@ impl Editor {
 
     #[cfg(feature = "test-support")]
     pub fn all_text_background_highlights(
-        &mut self,
+        &self,
         cx: &mut ViewContext<Self>,
     ) -> Vec<(Range<DisplayPoint>, Hsla)> {
         let snapshot = self.snapshot(cx);
@@ -12476,27 +12495,28 @@ impl Editor {
                 cx.emit(SearchEvent::MatchesInvalidated);
                 if *singleton_buffer_edited {
                     if let Some(project) = &self.project {
+                        let project = project.read(cx);
                         #[allow(clippy::mutable_key_type)]
-                        let languages_affected = multibuffer.update(cx, |multibuffer, cx| {
-                            multibuffer
-                                .all_buffers()
-                                .into_iter()
-                                .filter_map(|buffer| {
-                                    buffer.update(cx, |buffer, cx| {
-                                        let language = buffer.language()?;
-                                        let should_discard = project.update(cx, |project, cx| {
-                                            project.is_local()
-                                                && project.for_language_servers_for_local_buffer(
-                                                    buffer,
-                                                    |it| it.count() == 0,
-                                                    cx,
-                                                )
-                                        });
-                                        should_discard.not().then_some(language.clone())
-                                    })
-                                })
-                                .collect::<HashSet<_>>()
-                        });
+                        let languages_affected = multibuffer
+                            .read(cx)
+                            .all_buffers()
+                            .into_iter()
+                            .filter_map(|buffer| {
+                                let buffer = buffer.read(cx);
+                                let language = buffer.language()?;
+                                if project.is_local()
+                                    && project
+                                        .language_servers_for_local_buffer(buffer, cx)
+                                        .count()
+                                        == 0
+                                {
+                                    None
+                                } else {
+                                    Some(language)
+                                }
+                            })
+                            .cloned()
+                            .collect::<HashSet<_>>();
                         if !languages_affected.is_empty() {
                             self.refresh_inlay_hints(
                                 InlayHintRefreshReason::BufferEdited(languages_affected),
@@ -13050,18 +13070,15 @@ impl Editor {
         self.handle_input(text, cx);
     }
 
-    pub fn supports_inlay_hints(&self, cx: &mut AppContext) -> bool {
+    pub fn supports_inlay_hints(&self, cx: &AppContext) -> bool {
         let Some(provider) = self.semantics_provider.as_ref() else {
             return false;
         };
 
         let mut supports = false;
-        self.buffer().update(cx, |this, cx| {
-            this.for_each_buffer(|buffer| {
-                supports |= provider.supports_inlay_hints(buffer, cx);
-            })
+        self.buffer().read(cx).for_each_buffer(|buffer| {
+            supports |= provider.supports_inlay_hints(buffer, cx);
         });
-
         supports
     }
 
@@ -13184,7 +13201,7 @@ impl Editor {
     }
 
     pub fn to_pixel_point(
-        &mut self,
+        &self,
         source: multi_buffer::Anchor,
         editor_snapshot: &EditorSnapshot,
         cx: &mut ViewContext<Self>,
@@ -13673,7 +13690,7 @@ pub trait SemanticsProvider {
         cx: &mut AppContext,
     ) -> Option<Task<anyhow::Result<InlayHint>>>;
 
-    fn supports_inlay_hints(&self, buffer: &Model<Buffer>, cx: &mut AppContext) -> bool;
+    fn supports_inlay_hints(&self, buffer: &Model<Buffer>, cx: &AppContext) -> bool;
 
     fn document_highlights(
         &self,
@@ -14058,25 +14075,17 @@ impl SemanticsProvider for Model<Project> {
         }))
     }
 
-    fn supports_inlay_hints(&self, buffer: &Model<Buffer>, cx: &mut AppContext) -> bool {
+    fn supports_inlay_hints(&self, buffer: &Model<Buffer>, cx: &AppContext) -> bool {
         // TODO: make this work for remote projects
-        buffer.update(cx, |buffer, cx| {
-            self.update(cx, |this, cx| {
-                this.for_language_servers_for_local_buffer(
-                    buffer,
-                    |mut it| {
-                        it.any(
-                            |(_, server)| match server.capabilities().inlay_hint_provider {
-                                Some(lsp::OneOf::Left(enabled)) => enabled,
-                                Some(lsp::OneOf::Right(_)) => true,
-                                None => false,
-                            },
-                        )
-                    },
-                    cx,
-                )
-            })
-        })
+        self.read(cx)
+            .language_servers_for_local_buffer(buffer.read(cx), cx)
+            .any(
+                |(_, server)| match server.capabilities().inlay_hint_provider {
+                    Some(lsp::OneOf::Left(enabled)) => enabled,
+                    Some(lsp::OneOf::Right(_)) => true,
+                    None => false,
+                },
+            )
     }
 
     fn inlay_hints(
@@ -14970,74 +14979,23 @@ pub fn diagnostic_block_renderer(
 }
 
 fn inline_completion_edit_text(
-    editor_snapshot: &EditorSnapshot,
-    edits: &Vec<(Range<Anchor>, String)>,
+    current_snapshot: &BufferSnapshot,
+    edits: &[(Range<Anchor>, String)],
+    edit_preview: &EditPreview,
     include_deletions: bool,
     cx: &WindowContext,
-) -> InlineCompletionText {
-    let edit_start = edits
-        .first()
-        .unwrap()
-        .0
-        .start
-        .to_display_point(editor_snapshot);
+) -> Option<HighlightedEdits> {
+    let edits = edits
+        .iter()
+        .map(|(anchor, text)| {
+            (
+                anchor.start.text_anchor..anchor.end.text_anchor,
+                text.clone(),
+            )
+        })
+        .collect::<Vec<_>>();
 
-    let mut text = String::new();
-    let mut offset = DisplayPoint::new(edit_start.row(), 0).to_offset(editor_snapshot, Bias::Left);
-    let mut highlights = Vec::new();
-    for (old_range, new_text) in edits {
-        let old_offset_range = old_range.to_offset(&editor_snapshot.buffer_snapshot);
-        text.extend(
-            editor_snapshot
-                .buffer_snapshot
-                .chunks(offset..old_offset_range.start, false)
-                .map(|chunk| chunk.text),
-        );
-        offset = old_offset_range.end;
-
-        let start = text.len();
-        let color = if include_deletions && new_text.is_empty() {
-            text.extend(
-                editor_snapshot
-                    .buffer_snapshot
-                    .chunks(old_offset_range.start..offset, false)
-                    .map(|chunk| chunk.text),
-            );
-            cx.theme().status().deleted_background
-        } else {
-            text.push_str(new_text);
-            cx.theme().status().created_background
-        };
-        let end = text.len();
-
-        highlights.push((
-            start..end,
-            HighlightStyle {
-                background_color: Some(color),
-                ..Default::default()
-            },
-        ));
-    }
-
-    let edit_end = edits
-        .last()
-        .unwrap()
-        .0
-        .end
-        .to_display_point(editor_snapshot);
-    let end_of_line = DisplayPoint::new(edit_end.row(), editor_snapshot.line_len(edit_end.row()))
-        .to_offset(editor_snapshot, Bias::Right);
-    text.extend(
-        editor_snapshot
-            .buffer_snapshot
-            .chunks(offset..end_of_line, false)
-            .map(|chunk| chunk.text),
-    );
-
-    InlineCompletionText::Edit {
-        text: text.into(),
-        highlights,
-    }
+    Some(edit_preview.highlight_edits(current_snapshot, &edits, include_deletions, cx))
 }
 
 pub fn highlight_diagnostic_message(
