@@ -17,7 +17,7 @@ use crate::{
     LanguageScope, Outline, OutlineConfig, RunnableCapture, RunnableTag, TextObject,
     TreeSitterOptions,
 };
-use anyhow::{anyhow, Context, Result};
+use anyhow::{anyhow, Context as _, Result};
 use async_watch as watch;
 use clock::Lamport;
 pub use clock::ReplicaId;
@@ -25,8 +25,8 @@ use collections::HashMap;
 use fs::MTime;
 use futures::channel::oneshot;
 use gpui::{
-    AnyElement, AppContext, Context as _, EventEmitter, HighlightStyle, Model, ModelContext,
-    Pixels, SharedString, Task, TaskLabel, WindowContext,
+    AnyElement, App, AppContext as _, Context, Entity, EventEmitter, HighlightStyle, Pixels,
+    SharedString, Task, TaskLabel, Window,
 };
 use lsp::LanguageServerId;
 use parking_lot::Mutex;
@@ -137,7 +137,7 @@ pub enum ParseStatus {
 }
 
 struct BufferBranchState {
-    base_buffer: Model<Buffer>,
+    base_buffer: Entity<Buffer>,
     merged_operations: Vec<Lamport>,
 }
 
@@ -371,22 +371,22 @@ pub trait File: Send + Sync {
 
     /// Returns the path of this file relative to the worktree's parent directory (this means it
     /// includes the name of the worktree's root folder).
-    fn full_path(&self, cx: &AppContext) -> PathBuf;
+    fn full_path(&self, cx: &App) -> PathBuf;
 
     /// Returns the last component of this handle's absolute path. If this handle refers to the root
     /// of its worktree, then this method will return the name of the worktree itself.
-    fn file_name<'a>(&'a self, cx: &'a AppContext) -> &'a OsStr;
+    fn file_name<'a>(&'a self, cx: &'a App) -> &'a OsStr;
 
     /// Returns the id of the worktree to which this file belongs.
     ///
     /// This is needed for looking up project-specific settings.
-    fn worktree_id(&self, cx: &AppContext) -> WorktreeId;
+    fn worktree_id(&self, cx: &App) -> WorktreeId;
 
     /// Converts this file into an [`Any`] trait object.
     fn as_any(&self) -> &dyn Any;
 
     /// Converts this file into a protobuf message.
-    fn to_proto(&self, cx: &AppContext) -> rpc::proto::File;
+    fn to_proto(&self, cx: &App) -> rpc::proto::File;
 
     /// Return whether Zed considers this to be a private file.
     fn is_private(&self) -> bool;
@@ -420,13 +420,13 @@ impl DiskState {
 /// The file associated with a buffer, in the case where the file is on the local disk.
 pub trait LocalFile: File {
     /// Returns the absolute path of this file
-    fn abs_path(&self, cx: &AppContext) -> PathBuf;
+    fn abs_path(&self, cx: &App) -> PathBuf;
 
     /// Loads the file contents from disk and returns them as a UTF-8 encoded string.
-    fn load(&self, cx: &AppContext) -> Task<Result<String>>;
+    fn load(&self, cx: &App) -> Task<Result<String>>;
 
     /// Loads the file's contents from disk.
-    fn load_bytes(&self, cx: &AppContext) -> Task<Result<Vec<u8>>>;
+    fn load_bytes(&self, cx: &App) -> Task<Result<Vec<u8>>>;
 }
 
 /// The auto-indent behavior associated with an editing operation.
@@ -527,7 +527,8 @@ pub struct ChunkRenderer {
 }
 
 pub struct ChunkRendererContext<'a, 'b> {
-    pub context: &'a mut WindowContext<'b>,
+    pub window: &'a mut Window,
+    pub context: &'b mut App,
     pub max_width: Pixels,
 }
 
@@ -540,7 +541,7 @@ impl fmt::Debug for ChunkRenderer {
 }
 
 impl<'a, 'b> Deref for ChunkRendererContext<'a, 'b> {
-    type Target = WindowContext<'b>;
+    type Target = App;
 
     fn deref(&self) -> &Self::Target {
         self.context
@@ -589,6 +590,7 @@ pub struct Runnable {
 
 #[derive(Clone)]
 pub struct EditPreview {
+    old_snapshot: text::BufferSnapshot,
     applied_edits_snapshot: text::BufferSnapshot,
     syntax_snapshot: SyntaxSnapshot,
 }
@@ -605,68 +607,82 @@ impl EditPreview {
         current_snapshot: &BufferSnapshot,
         edits: &[(Range<Anchor>, String)],
         include_deletions: bool,
-        cx: &AppContext,
+        cx: &App,
     ) -> HighlightedEdits {
-        let mut text = String::new();
-        let mut highlights = Vec::new();
-        let Some(range) = self.compute_visible_range(edits, current_snapshot) else {
+        let Some(visible_range_in_preview_snapshot) = self.compute_visible_range(edits) else {
             return HighlightedEdits::default();
         };
-        let mut offset = range.start;
-        let mut delta = 0isize;
 
-        let status_colors = cx.theme().status();
+        let mut text = String::new();
+        let mut highlights = Vec::new();
+
+        let mut offset_in_preview_snapshot = visible_range_in_preview_snapshot.start;
+
+        let insertion_highlight_style = HighlightStyle {
+            background_color: Some(cx.theme().status().created_background),
+            ..Default::default()
+        };
+        let deletion_highlight_style = HighlightStyle {
+            background_color: Some(cx.theme().status().deleted_background),
+            ..Default::default()
+        };
 
         for (range, edit_text) in edits {
-            let edit_range = range.to_offset(current_snapshot);
-            let new_edit_start = (edit_range.start as isize + delta) as usize;
-            let new_edit_range = new_edit_start..new_edit_start + edit_text.len();
+            let edit_new_end_in_preview_snapshot = range
+                .end
+                .bias_right(&self.old_snapshot)
+                .to_offset(&self.applied_edits_snapshot);
+            let edit_start_in_preview_snapshot = edit_new_end_in_preview_snapshot - edit_text.len();
 
-            let prev_range = offset..new_edit_start;
-
-            if !prev_range.is_empty() {
-                let start = text.len();
-                self.highlight_text(prev_range, &mut text, &mut highlights, None, cx);
-                offset += text.len() - start;
+            let unchanged_range_in_preview_snapshot =
+                offset_in_preview_snapshot..edit_start_in_preview_snapshot;
+            if !unchanged_range_in_preview_snapshot.is_empty() {
+                Self::highlight_text(
+                    unchanged_range_in_preview_snapshot.clone(),
+                    &mut text,
+                    &mut highlights,
+                    None,
+                    &self.applied_edits_snapshot,
+                    &self.syntax_snapshot,
+                    cx,
+                );
             }
 
-            if include_deletions && !edit_range.is_empty() {
-                let start = text.len();
-                text.extend(current_snapshot.text_for_range(edit_range.clone()));
-                let end = text.len();
-
-                highlights.push((
-                    start..end,
-                    HighlightStyle {
-                        background_color: Some(status_colors.deleted_background),
-                        ..Default::default()
-                    },
-                ));
+            let range_in_current_snapshot = range.to_offset(current_snapshot);
+            if include_deletions && !range_in_current_snapshot.is_empty() {
+                Self::highlight_text(
+                    range_in_current_snapshot.clone(),
+                    &mut text,
+                    &mut highlights,
+                    Some(deletion_highlight_style),
+                    &current_snapshot.text,
+                    &current_snapshot.syntax,
+                    cx,
+                );
             }
 
             if !edit_text.is_empty() {
-                self.highlight_text(
-                    new_edit_range,
+                Self::highlight_text(
+                    edit_start_in_preview_snapshot..edit_new_end_in_preview_snapshot,
                     &mut text,
                     &mut highlights,
-                    Some(HighlightStyle {
-                        background_color: Some(status_colors.created_background),
-                        ..Default::default()
-                    }),
+                    Some(insertion_highlight_style),
+                    &self.applied_edits_snapshot,
+                    &self.syntax_snapshot,
                     cx,
                 );
-
-                offset += edit_text.len();
             }
 
-            delta += edit_text.len() as isize - edit_range.len() as isize;
+            offset_in_preview_snapshot = edit_new_end_in_preview_snapshot;
         }
 
-        self.highlight_text(
-            offset..(range.end as isize + delta) as usize,
+        Self::highlight_text(
+            offset_in_preview_snapshot..visible_range_in_preview_snapshot.end,
             &mut text,
             &mut highlights,
             None,
+            &self.applied_edits_snapshot,
+            &self.syntax_snapshot,
             cx,
         );
 
@@ -677,14 +693,15 @@ impl EditPreview {
     }
 
     fn highlight_text(
-        &self,
         range: Range<usize>,
         text: &mut String,
         highlights: &mut Vec<(Range<usize>, HighlightStyle)>,
         override_style: Option<HighlightStyle>,
-        cx: &AppContext,
+        snapshot: &text::BufferSnapshot,
+        syntax_snapshot: &SyntaxSnapshot,
+        cx: &App,
     ) {
-        for chunk in self.highlighted_chunks(range) {
+        for chunk in Self::highlighted_chunks(range, snapshot, syntax_snapshot) {
             let start = text.len();
             text.push_str(chunk.text);
             let end = text.len();
@@ -703,12 +720,14 @@ impl EditPreview {
         }
     }
 
-    fn highlighted_chunks(&self, range: Range<usize>) -> BufferChunks {
-        let captures =
-            self.syntax_snapshot
-                .captures(range.clone(), &self.applied_edits_snapshot, |grammar| {
-                    grammar.highlights_query.as_ref()
-                });
+    fn highlighted_chunks<'a>(
+        range: Range<usize>,
+        snapshot: &'a text::BufferSnapshot,
+        syntax_snapshot: &'a SyntaxSnapshot,
+    ) -> BufferChunks<'a> {
+        let captures = syntax_snapshot.captures(range.clone(), snapshot, |grammar| {
+            grammar.highlights_query.as_ref()
+        });
 
         let highlight_maps = captures
             .grammars()
@@ -717,7 +736,7 @@ impl EditPreview {
             .collect();
 
         BufferChunks::new(
-            self.applied_edits_snapshot.as_rope(),
+            snapshot.as_rope(),
             range,
             Some((captures, highlight_maps)),
             false,
@@ -725,27 +744,30 @@ impl EditPreview {
         )
     }
 
-    fn compute_visible_range(
-        &self,
-        edits: &[(Range<Anchor>, String)],
-        snapshot: &BufferSnapshot,
-    ) -> Option<Range<usize>> {
+    fn compute_visible_range(&self, edits: &[(Range<Anchor>, String)]) -> Option<Range<usize>> {
         let (first, _) = edits.first()?;
         let (last, _) = edits.last()?;
 
-        let start = first.start.to_point(snapshot);
-        let end = last.end.to_point(snapshot);
+        let start = first
+            .start
+            .bias_left(&self.old_snapshot)
+            .to_point(&self.applied_edits_snapshot);
+        let end = last
+            .end
+            .bias_right(&self.old_snapshot)
+            .to_point(&self.applied_edits_snapshot);
 
         // Ensure that the first line of the first edit and the last line of the last edit are always fully visible
-        let range = Point::new(start.row, 0)..Point::new(end.row, snapshot.line_len(end.row));
+        let range = Point::new(start.row, 0)
+            ..Point::new(end.row, self.applied_edits_snapshot.line_len(end.row));
 
-        Some(range.to_offset(&snapshot))
+        Some(range.to_offset(&self.applied_edits_snapshot))
     }
 }
 
 impl Buffer {
     /// Create a new buffer with the given base text.
-    pub fn local<T: Into<String>>(base_text: T, cx: &ModelContext<Self>) -> Self {
+    pub fn local<T: Into<String>>(base_text: T, cx: &Context<Self>) -> Self {
         Self::build(
             TextBuffer::new(0, cx.entity_id().as_non_zero_u64().into(), base_text.into()),
             None,
@@ -757,7 +779,7 @@ impl Buffer {
     pub fn local_normalized(
         base_text_normalized: Rope,
         line_ending: LineEnding,
-        cx: &ModelContext<Self>,
+        cx: &Context<Self>,
     ) -> Self {
         Self::build(
             TextBuffer::new_normalized(
@@ -807,7 +829,7 @@ impl Buffer {
     }
 
     /// Serialize the buffer's state to a protobuf message.
-    pub fn to_proto(&self, cx: &AppContext) -> proto::BufferState {
+    pub fn to_proto(&self, cx: &App) -> proto::BufferState {
         proto::BufferState {
             id: self.remote_id().into(),
             file: self.file.as_ref().map(|f| f.to_proto(cx)),
@@ -822,7 +844,7 @@ impl Buffer {
     pub fn serialize_ops(
         &self,
         since: Option<clock::Global>,
-        cx: &AppContext,
+        cx: &App,
     ) -> Task<Vec<proto::Operation>> {
         let mut operations = Vec::new();
         operations.extend(self.deferred_ops.iter().map(proto::serialize_operation));
@@ -869,7 +891,7 @@ impl Buffer {
     }
 
     /// Assign a language to the buffer, returning the buffer.
-    pub fn with_language(mut self, language: Arc<Language>, cx: &mut ModelContext<Self>) -> Self {
+    pub fn with_language(mut self, language: Arc<Language>, cx: &mut Context<Self>) -> Self {
         self.set_language(Some(language), cx);
         self
     }
@@ -925,9 +947,9 @@ impl Buffer {
         text: Rope,
         language: Option<Arc<Language>>,
         language_registry: Option<Arc<LanguageRegistry>>,
-        cx: &mut AppContext,
+        cx: &mut App,
     ) -> impl Future<Output = BufferSnapshot> {
-        let entity_id = cx.reserve_model::<Self>().entity_id();
+        let entity_id = cx.reserve_entity::<Self>().entity_id();
         let buffer_id = entity_id.as_non_zero_u64().into();
         async move {
             let text =
@@ -970,9 +992,9 @@ impl Buffer {
         }
     }
 
-    pub fn branch(&mut self, cx: &mut ModelContext<Self>) -> Model<Self> {
-        let this = cx.handle();
-        cx.new_model(|cx| {
+    pub fn branch(&mut self, cx: &mut Context<Self>) -> Entity<Self> {
+        let this = cx.entity();
+        cx.new(|cx| {
             let mut branch = Self {
                 branch_state: Some(BufferBranchState {
                     base_buffer: this.clone(),
@@ -998,11 +1020,11 @@ impl Buffer {
     pub fn preview_edits(
         &self,
         edits: Arc<[(Range<Anchor>, String)]>,
-        cx: &AppContext,
+        cx: &App,
     ) -> Task<EditPreview> {
         let registry = self.language_registry();
         let language = self.language().cloned();
-
+        let old_snapshot = self.text.snapshot();
         let mut branch_buffer = self.text.branch();
         let mut syntax_snapshot = self.syntax_map.lock().snapshot();
         cx.background_executor().spawn(async move {
@@ -1016,6 +1038,7 @@ impl Buffer {
                 }
             }
             EditPreview {
+                old_snapshot,
                 applied_edits_snapshot: branch_buffer.snapshot(),
                 syntax_snapshot,
             }
@@ -1027,7 +1050,7 @@ impl Buffer {
     ///
     /// If `ranges` is empty, then all changes will be applied. This buffer must
     /// be a branch buffer to call this method.
-    pub fn merge_into_base(&mut self, ranges: Vec<Range<usize>>, cx: &mut ModelContext<Self>) {
+    pub fn merge_into_base(&mut self, ranges: Vec<Range<usize>>, cx: &mut Context<Self>) {
         let Some(base_buffer) = self.base_buffer() else {
             debug_panic!("not a branch buffer");
             return;
@@ -1080,9 +1103,9 @@ impl Buffer {
 
     fn on_base_buffer_event(
         &mut self,
-        _: Model<Buffer>,
+        _: Entity<Buffer>,
         event: &BufferEvent,
-        cx: &mut ModelContext<Self>,
+        cx: &mut Context<Self>,
     ) {
         let BufferEvent::Operation { operation, .. } = event else {
             return;
@@ -1137,7 +1160,7 @@ impl Buffer {
     }
 
     /// Assign a language to the buffer.
-    pub fn set_language(&mut self, language: Option<Arc<Language>>, cx: &mut ModelContext<Self>) {
+    pub fn set_language(&mut self, language: Option<Arc<Language>>, cx: &mut Context<Self>) {
         self.non_text_state_update_count += 1;
         self.syntax_map.lock().clear(&self.text);
         self.language = language;
@@ -1158,7 +1181,7 @@ impl Buffer {
     }
 
     /// Assign the buffer a new [`Capability`].
-    pub fn set_capability(&mut self, capability: Capability, cx: &mut ModelContext<Self>) {
+    pub fn set_capability(&mut self, capability: Capability, cx: &mut Context<Self>) {
         self.capability = capability;
         cx.emit(BufferEvent::CapabilityChanged)
     }
@@ -1168,7 +1191,7 @@ impl Buffer {
         &mut self,
         version: clock::Global,
         mtime: Option<MTime>,
-        cx: &mut ModelContext<Self>,
+        cx: &mut Context<Self>,
     ) {
         self.saved_version = version;
         self.has_unsaved_edits
@@ -1180,13 +1203,13 @@ impl Buffer {
     }
 
     /// This method is called to signal that the buffer has been discarded.
-    pub fn discarded(&self, cx: &mut ModelContext<Self>) {
+    pub fn discarded(&self, cx: &mut Context<Self>) {
         cx.emit(BufferEvent::Discarded);
         cx.notify();
     }
 
     /// Reloads the contents of the buffer from disk.
-    pub fn reload(&mut self, cx: &ModelContext<Self>) -> oneshot::Receiver<Option<Transaction>> {
+    pub fn reload(&mut self, cx: &Context<Self>) -> oneshot::Receiver<Option<Transaction>> {
         let (tx, rx) = futures::channel::oneshot::channel();
         let prev_version = self.text.version();
         self.reload_task = Some(cx.spawn(|this, mut cx| async move {
@@ -1234,7 +1257,7 @@ impl Buffer {
         version: clock::Global,
         line_ending: LineEnding,
         mtime: Option<MTime>,
-        cx: &mut ModelContext<Self>,
+        cx: &mut Context<Self>,
     ) {
         self.saved_version = version;
         self.has_unsaved_edits
@@ -1247,7 +1270,7 @@ impl Buffer {
 
     /// Updates the [`File`] backing this buffer. This should be called when
     /// the file has changed or has been deleted.
-    pub fn file_updated(&mut self, new_file: Arc<dyn File>, cx: &mut ModelContext<Self>) {
+    pub fn file_updated(&mut self, new_file: Arc<dyn File>, cx: &mut Context<Self>) {
         let was_dirty = self.is_dirty();
         let mut file_changed = false;
 
@@ -1279,7 +1302,7 @@ impl Buffer {
         }
     }
 
-    pub fn base_buffer(&self) -> Option<Model<Self>> {
+    pub fn base_buffer(&self) -> Option<Entity<Self>> {
         Some(self.branch_state.as_ref()?.base_buffer.clone())
     }
 
@@ -1345,7 +1368,7 @@ impl Buffer {
     /// initiate an additional reparse recursively. To avoid concurrent parses
     /// for the same buffer, we only initiate a new parse if we are not already
     /// parsing in the background.
-    pub fn reparse(&mut self, cx: &mut ModelContext<Self>) {
+    pub fn reparse(&mut self, cx: &mut Context<Self>) {
         if self.parsing_in_background {
             return;
         }
@@ -1411,7 +1434,7 @@ impl Buffer {
         }
     }
 
-    fn did_finish_parsing(&mut self, syntax_snapshot: SyntaxSnapshot, cx: &mut ModelContext<Self>) {
+    fn did_finish_parsing(&mut self, syntax_snapshot: SyntaxSnapshot, cx: &mut Context<Self>) {
         self.non_text_state_update_count += 1;
         self.syntax_map.lock().did_parse(syntax_snapshot);
         self.request_autoindent(cx);
@@ -1429,7 +1452,7 @@ impl Buffer {
         &mut self,
         server_id: LanguageServerId,
         diagnostics: DiagnosticSet,
-        cx: &mut ModelContext<Self>,
+        cx: &mut Context<Self>,
     ) {
         let lamport_timestamp = self.text.lamport_clock.tick();
         let op = Operation::UpdateDiagnostics {
@@ -1441,7 +1464,7 @@ impl Buffer {
         self.send_operation(op, true, cx);
     }
 
-    fn request_autoindent(&mut self, cx: &mut ModelContext<Self>) {
+    fn request_autoindent(&mut self, cx: &mut Context<Self>) {
         if let Some(indent_sizes) = self.compute_autoindents() {
             let indent_sizes = cx.background_executor().spawn(indent_sizes);
             match cx
@@ -1637,7 +1660,7 @@ impl Buffer {
     fn apply_autoindents(
         &mut self,
         indent_sizes: BTreeMap<u32, IndentSize>,
-        cx: &mut ModelContext<Self>,
+        cx: &mut Context<Self>,
     ) {
         self.autoindent_requests.clear();
 
@@ -1695,7 +1718,7 @@ impl Buffer {
 
     /// Spawns a background task that asynchronously computes a `Diff` between the buffer's text
     /// and the given new text.
-    pub fn diff(&self, mut new_text: String, cx: &AppContext) -> Task<Diff> {
+    pub fn diff(&self, mut new_text: String, cx: &App) -> Task<Diff> {
         let old_text = self.as_rope().clone();
         let base_version = self.version();
         cx.background_executor()
@@ -1768,7 +1791,7 @@ impl Buffer {
 
     /// Spawns a background task that searches the buffer for any whitespace
     /// at the ends of a lines, and returns a `Diff` that removes that whitespace.
-    pub fn remove_trailing_whitespace(&self, cx: &AppContext) -> Task<Diff> {
+    pub fn remove_trailing_whitespace(&self, cx: &App) -> Task<Diff> {
         let old_text = self.as_rope().clone();
         let line_ending = self.line_ending();
         let base_version = self.version();
@@ -1788,7 +1811,7 @@ impl Buffer {
 
     /// Ensures that the buffer ends with a single newline character, and
     /// no other whitespace.
-    pub fn ensure_final_newline(&mut self, cx: &mut ModelContext<Self>) {
+    pub fn ensure_final_newline(&mut self, cx: &mut Context<Self>) {
         let len = self.len();
         let mut offset = len;
         for chunk in self.as_rope().reversed_chunks_in_range(0..len) {
@@ -1810,7 +1833,7 @@ impl Buffer {
     /// Applies a diff to the buffer. If the buffer has changed since the given diff was
     /// calculated, then adjust the diff to account for those changes, and discard any
     /// parts of the diff that conflict with those changes.
-    pub fn apply_diff(&mut self, diff: Diff, cx: &mut ModelContext<Self>) -> Option<TransactionId> {
+    pub fn apply_diff(&mut self, diff: Diff, cx: &mut Context<Self>) -> Option<TransactionId> {
         // Check for any edits to the buffer that have occurred since this diff
         // was computed.
         let snapshot = self.snapshot();
@@ -1916,7 +1939,7 @@ impl Buffer {
     }
 
     /// Terminates the current transaction, if this is the outermost transaction.
-    pub fn end_transaction(&mut self, cx: &mut ModelContext<Self>) -> Option<TransactionId> {
+    pub fn end_transaction(&mut self, cx: &mut Context<Self>) -> Option<TransactionId> {
         self.end_transaction_at(Instant::now(), cx)
     }
 
@@ -1926,7 +1949,7 @@ impl Buffer {
     pub fn end_transaction_at(
         &mut self,
         now: Instant,
-        cx: &mut ModelContext<Self>,
+        cx: &mut Context<Self>,
     ) -> Option<TransactionId> {
         assert!(self.transaction_depth > 0);
         self.transaction_depth -= 1;
@@ -2002,7 +2025,7 @@ impl Buffer {
         selections: Arc<[Selection<Anchor>]>,
         line_mode: bool,
         cursor_shape: CursorShape,
-        cx: &mut ModelContext<Self>,
+        cx: &mut Context<Self>,
     ) {
         let lamport_timestamp = self.text.lamport_clock.tick();
         self.remote_selections.insert(
@@ -2030,7 +2053,7 @@ impl Buffer {
 
     /// Clears the selections, so that other replicas of the buffer do not see any selections for
     /// this replica.
-    pub fn remove_active_selections(&mut self, cx: &mut ModelContext<Self>) {
+    pub fn remove_active_selections(&mut self, cx: &mut Context<Self>) {
         if self
             .remote_selections
             .get(&self.text.replica_id())
@@ -2041,7 +2064,7 @@ impl Buffer {
     }
 
     /// Replaces the buffer's entire text.
-    pub fn set_text<T>(&mut self, text: T, cx: &mut ModelContext<Self>) -> Option<clock::Lamport>
+    pub fn set_text<T>(&mut self, text: T, cx: &mut Context<Self>) -> Option<clock::Lamport>
     where
         T: Into<Arc<str>>,
     {
@@ -2062,7 +2085,7 @@ impl Buffer {
         &mut self,
         edits_iter: I,
         autoindent_mode: Option<AutoindentMode>,
-        cx: &mut ModelContext<Self>,
+        cx: &mut Context<Self>,
     ) -> Option<clock::Lamport>
     where
         I: IntoIterator<Item = (Range<S>, T)>,
@@ -2184,12 +2207,7 @@ impl Buffer {
         Some(edit_id)
     }
 
-    fn did_edit(
-        &mut self,
-        old_version: &clock::Global,
-        was_dirty: bool,
-        cx: &mut ModelContext<Self>,
-    ) {
+    fn did_edit(&mut self, old_version: &clock::Global, was_dirty: bool, cx: &mut Context<Self>) {
         if self.edits_since::<usize>(old_version).next().is_none() {
             return;
         }
@@ -2203,7 +2221,7 @@ impl Buffer {
         cx.notify();
     }
 
-    pub fn autoindent_ranges<I, T>(&mut self, ranges: I, cx: &mut ModelContext<Self>)
+    pub fn autoindent_ranges<I, T>(&mut self, ranges: I, cx: &mut Context<Self>)
     where
         I: IntoIterator<Item = Range<T>>,
         T: ToOffset + Copy,
@@ -2234,7 +2252,7 @@ impl Buffer {
         position: impl ToPoint,
         space_above: bool,
         space_below: bool,
-        cx: &mut ModelContext<Self>,
+        cx: &mut Context<Self>,
     ) -> Point {
         let mut position = position.to_point(self);
 
@@ -2283,11 +2301,7 @@ impl Buffer {
     }
 
     /// Applies the given remote operations to the buffer.
-    pub fn apply_ops<I: IntoIterator<Item = Operation>>(
-        &mut self,
-        ops: I,
-        cx: &mut ModelContext<Self>,
-    ) {
+    pub fn apply_ops<I: IntoIterator<Item = Operation>>(&mut self, ops: I, cx: &mut Context<Self>) {
         self.pending_autoindent.take();
         let was_dirty = self.is_dirty();
         let old_version = self.version.clone();
@@ -2318,7 +2332,7 @@ impl Buffer {
         cx.notify();
     }
 
-    fn flush_deferred_ops(&mut self, cx: &mut ModelContext<Self>) {
+    fn flush_deferred_ops(&mut self, cx: &mut Context<Self>) {
         let mut deferred_ops = Vec::new();
         for op in self.deferred_ops.drain().iter().cloned() {
             if self.can_apply_op(&op) {
@@ -2353,7 +2367,7 @@ impl Buffer {
         }
     }
 
-    fn apply_op(&mut self, operation: Operation, cx: &mut ModelContext<Self>) {
+    fn apply_op(&mut self, operation: Operation, cx: &mut Context<Self>) {
         match operation {
             Operation::Buffer(_) => {
                 unreachable!("buffer operations should never be applied at this layer")
@@ -2423,7 +2437,7 @@ impl Buffer {
         server_id: LanguageServerId,
         diagnostics: DiagnosticSet,
         lamport_timestamp: clock::Lamport,
-        cx: &mut ModelContext<Self>,
+        cx: &mut Context<Self>,
     ) {
         if lamport_timestamp > self.diagnostics_timestamp {
             let ix = self.diagnostics.binary_search_by_key(&server_id, |e| e.0);
@@ -2445,7 +2459,7 @@ impl Buffer {
         }
     }
 
-    fn send_operation(&self, operation: Operation, is_local: bool, cx: &mut ModelContext<Self>) {
+    fn send_operation(&self, operation: Operation, is_local: bool, cx: &mut Context<Self>) {
         cx.emit(BufferEvent::Operation {
             operation,
             is_local,
@@ -2453,13 +2467,13 @@ impl Buffer {
     }
 
     /// Removes the selections for a given peer.
-    pub fn remove_peer(&mut self, replica_id: ReplicaId, cx: &mut ModelContext<Self>) {
+    pub fn remove_peer(&mut self, replica_id: ReplicaId, cx: &mut Context<Self>) {
         self.remote_selections.remove(&replica_id);
         cx.notify();
     }
 
     /// Undoes the most recent transaction.
-    pub fn undo(&mut self, cx: &mut ModelContext<Self>) -> Option<TransactionId> {
+    pub fn undo(&mut self, cx: &mut Context<Self>) -> Option<TransactionId> {
         let was_dirty = self.is_dirty();
         let old_version = self.version.clone();
 
@@ -2476,7 +2490,7 @@ impl Buffer {
     pub fn undo_transaction(
         &mut self,
         transaction_id: TransactionId,
-        cx: &mut ModelContext<Self>,
+        cx: &mut Context<Self>,
     ) -> bool {
         let was_dirty = self.is_dirty();
         let old_version = self.version.clone();
@@ -2493,7 +2507,7 @@ impl Buffer {
     pub fn undo_to_transaction(
         &mut self,
         transaction_id: TransactionId,
-        cx: &mut ModelContext<Self>,
+        cx: &mut Context<Self>,
     ) -> bool {
         let was_dirty = self.is_dirty();
         let old_version = self.version.clone();
@@ -2509,11 +2523,7 @@ impl Buffer {
         undone
     }
 
-    pub fn undo_operations(
-        &mut self,
-        counts: HashMap<Lamport, u32>,
-        cx: &mut ModelContext<Buffer>,
-    ) {
+    pub fn undo_operations(&mut self, counts: HashMap<Lamport, u32>, cx: &mut Context<Buffer>) {
         let was_dirty = self.is_dirty();
         let operation = self.text.undo_operations(counts);
         let old_version = self.version.clone();
@@ -2522,7 +2532,7 @@ impl Buffer {
     }
 
     /// Manually redoes a specific transaction in the buffer's redo history.
-    pub fn redo(&mut self, cx: &mut ModelContext<Self>) -> Option<TransactionId> {
+    pub fn redo(&mut self, cx: &mut Context<Self>) -> Option<TransactionId> {
         let was_dirty = self.is_dirty();
         let old_version = self.version.clone();
 
@@ -2539,7 +2549,7 @@ impl Buffer {
     pub fn redo_to_transaction(
         &mut self,
         transaction_id: TransactionId,
-        cx: &mut ModelContext<Self>,
+        cx: &mut Context<Self>,
     ) -> bool {
         let was_dirty = self.is_dirty();
         let old_version = self.version.clone();
@@ -2560,7 +2570,7 @@ impl Buffer {
         &mut self,
         server_id: LanguageServerId,
         triggers: BTreeSet<String>,
-        cx: &mut ModelContext<Self>,
+        cx: &mut Context<Self>,
     ) {
         self.completion_triggers_timestamp = self.text.lamport_clock.tick();
         if triggers.is_empty() {
@@ -2614,7 +2624,7 @@ impl Buffer {
         &mut self,
         marked_string: &str,
         autoindent_mode: Option<AutoindentMode>,
-        cx: &mut ModelContext<Self>,
+        cx: &mut Context<Self>,
     ) {
         let edits = self.edits_for_marked_text(marked_string);
         self.edit(edits, autoindent_mode, cx);
@@ -2624,12 +2634,8 @@ impl Buffer {
         self.text.set_group_interval(group_interval);
     }
 
-    pub fn randomly_edit<T>(
-        &mut self,
-        rng: &mut T,
-        old_range_count: usize,
-        cx: &mut ModelContext<Self>,
-    ) where
+    pub fn randomly_edit<T>(&mut self, rng: &mut T, old_range_count: usize, cx: &mut Context<Self>)
+    where
         T: rand::Rng,
     {
         let mut edits: Vec<(Range<usize>, String)> = Vec::new();
@@ -2656,7 +2662,7 @@ impl Buffer {
         self.edit(edits, None, cx);
     }
 
-    pub fn randomly_undo_redo(&mut self, rng: &mut impl rand::Rng, cx: &mut ModelContext<Self>) {
+    pub fn randomly_undo_redo(&mut self, rng: &mut impl rand::Rng, cx: &mut Context<Self>) {
         let was_dirty = self.is_dirty();
         let old_version = self.version.clone();
 
@@ -2687,7 +2693,7 @@ impl BufferSnapshot {
     }
     /// Returns [`IndentSize`] for a given position that respects user settings
     /// and language preferences.
-    pub fn language_indent_size_at<T: ToOffset>(&self, position: T, cx: &AppContext) -> IndentSize {
+    pub fn language_indent_size_at<T: ToOffset>(&self, position: T, cx: &App) -> IndentSize {
         let settings = language_settings(
             self.language_at(position).map(|l| l.name()),
             self.file(),
@@ -3027,7 +3033,7 @@ impl BufferSnapshot {
     pub fn settings_at<'a, D: ToOffset>(
         &'a self,
         position: D,
-        cx: &'a AppContext,
+        cx: &'a App,
     ) -> Cow<'a, LanguageSettings> {
         language_settings(
             self.language_at(position).map(|l| l.name()),
@@ -4000,7 +4006,7 @@ impl BufferSnapshot {
     }
 
     /// Resolves the file path (relative to the worktree root) associated with the underlying file.
-    pub fn resolve_file_path(&self, cx: &AppContext, include_root: bool) -> Option<PathBuf> {
+    pub fn resolve_file_path(&self, cx: &App, include_root: bool) -> Option<PathBuf> {
         if let Some(file) = self.file() {
             if file.path().file_name().is_none() || include_root {
                 Some(file.full_path(cx))
@@ -4403,7 +4409,7 @@ impl File for TestFile {
         &self.path
     }
 
-    fn full_path(&self, _: &gpui::AppContext) -> PathBuf {
+    fn full_path(&self, _: &gpui::App) -> PathBuf {
         PathBuf::from(&self.root_name).join(self.path.as_ref())
     }
 
@@ -4415,11 +4421,11 @@ impl File for TestFile {
         unimplemented!()
     }
 
-    fn file_name<'a>(&'a self, _: &'a gpui::AppContext) -> &'a std::ffi::OsStr {
+    fn file_name<'a>(&'a self, _: &'a gpui::App) -> &'a std::ffi::OsStr {
         self.path().file_name().unwrap_or(self.root_name.as_ref())
     }
 
-    fn worktree_id(&self, _: &AppContext) -> WorktreeId {
+    fn worktree_id(&self, _: &App) -> WorktreeId {
         WorktreeId::from_usize(0)
     }
 
@@ -4427,7 +4433,7 @@ impl File for TestFile {
         unimplemented!()
     }
 
-    fn to_proto(&self, _: &AppContext) -> rpc::proto::File {
+    fn to_proto(&self, _: &App) -> rpc::proto::File {
         unimplemented!()
     }
 
